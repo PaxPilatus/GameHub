@@ -1,0 +1,28 @@
+{
+  "name": "game-hub",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "node ./scripts/dev.mjs",
+    "build": "node ./scripts/build.mjs",
+    "start:built": "node ./scripts/start-built.mjs",
+    "test": "node ./node_modules/vitest/vitest.mjs run",
+    "lint": "node ./node_modules/eslint/bin/eslint.js . --ext .ts,.tsx,.mts --max-warnings=0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.19",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.5.13",
+    "@typescript-eslint/eslint-plugin": "^8.25.0",
+    "@typescript-eslint/parser": "^8.25.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.5.2",
+    "typescript": "^5.8.2",
+    "vite": "^5.4.14",
+    "vitest": "^3.0.8"
+  }
+}

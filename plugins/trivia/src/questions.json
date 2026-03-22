@@ -1,0 +1,57 @@
+[
+  {
+    "id": "space-moon",
+    "prompt": "Welcher Planet hat die meisten bekannten Monde in unserem Sonnensystem?",
+    "options": [
+      { "id": "a", "label": "Mars" },
+      { "id": "b", "label": "Jupiter" },
+      { "id": "c", "label": "Venus" },
+      { "id": "d", "label": "Merkur" }
+    ],
+    "correctOptionId": "b"
+  },
+  {
+    "id": "history-print",
+    "prompt": "In welchem Jahrhundert wurde der Buchdruck mit beweglichen Lettern in Europa verbreitet?",
+    "options": [
+      { "id": "a", "label": "13. Jahrhundert" },
+      { "id": "b", "label": "14. Jahrhundert" },
+      { "id": "c", "label": "15. Jahrhundert" },
+      { "id": "d", "label": "16. Jahrhundert" }
+    ],
+    "correctOptionId": "c"
+  },
+  {
+    "id": "geo-river",
+    "prompt": "Welcher Fluss fliesst durch Wien, Bratislava und Budapest?",
+    "options": [
+      { "id": "a", "label": "Donau" },
+      { "id": "b", "label": "Rhein" },
+      { "id": "c", "label": "Elbe" },
+      { "id": "d", "label": "Po" }
+    ],
+    "correctOptionId": "a"
+  },
+  {
+    "id": "science-light",
+    "prompt": "Welche Farbe hat Licht mit der kuerzesten sichtbaren Wellenlaenge?",
+    "options": [
+      { "id": "a", "label": "Rot" },
+      { "id": "b", "label": "Gelb" },
+      { "id": "c", "label": "Gruen" },
+      { "id": "d", "label": "Violett" }
+    ],
+    "correctOptionId": "d"
+  },
+  {
+    "id": "culture-music",
+    "prompt": "Wie viele Saiten hat eine klassische Standard-Gitarre?",
+    "options": [
+      { "id": "a", "label": "4" },
+      { "id": "b", "label": "5" },
+      { "id": "c", "label": "6" },
+      { "id": "d", "label": "7" }
+    ],
+    "correctOptionId": "c"
+  }
+]

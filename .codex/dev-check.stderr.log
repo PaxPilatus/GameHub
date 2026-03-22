@@ -1,0 +1,12 @@
+[31mfailed to load config from C:\dev\GAME HUB\apps\mobile\vite.config.ts[39m
+[31merror during build:
+Error: spawn EPERM
+    at ChildProcess.spawn (node:internal/child_process:421:11)
+    at Object.spawn (node:child_process:761:9)
+    at ensureServiceIsRunning (C:\dev\GAME HUB\node_modules\.pnpm\esbuild@0.21.5\node_modules\esbuild\lib\main.js:1975:29)
+    at build (C:\dev\GAME HUB\node_modules\.pnpm\esbuild@0.21.5\node_modules\esbuild\lib\main.js:1873:26)
+    at bundleConfigFile (file:///C:/dev/GAME%20HUB/node_modules/.pnpm/vite@5.4.21_@types+node@20.19.37/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:66845:24)
+    at loadConfigFromFile (file:///C:/dev/GAME%20HUB/node_modules/.pnpm/vite@5.4.21_@types+node@20.19.37/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:66815:27)
+    at resolveConfig (file:///C:/dev/GAME%20HUB/node_modules/.pnpm/vite@5.4.21_@types+node@20.19.37/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:66416:30)
+    at build (file:///C:/dev/GAME%20HUB/node_modules/.pnpm/vite@5.4.21_@types+node@20.19.37/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:65503:24)
+    at CAC.<anonymous> (file:///C:/dev/GAME%20HUB/node_modules/.pnpm/vite@5.4.21_@types+node@20.19.37/node_modules/vite/dist/node/cli.js:829:11)[39m

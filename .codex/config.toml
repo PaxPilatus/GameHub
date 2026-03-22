@@ -1,0 +1,15 @@
+# Standardmodell fuer Coding-Aufgaben in diesem Repo.
+model = "gpt-5.4"
+
+# Etwas mehr Sorgfalt fuer Implementierungen, ohne den Default maximal zu verlangsamen.
+model_reasoning_effort = "high"
+
+# Konservativ: nur klar vertrauenswuerdige Kommandos laufen ohne Rueckfrage.
+approval_policy = "untrusted"
+
+# Arbeiten bleiben auf das Workspace beschraenkt, statt voll offen zu laufen.
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+# Kein Netzwerkzugriff per Default; reduziert unbeabsichtigte externe Calls.
+network_access = false

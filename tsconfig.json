@@ -1,0 +1,29 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/protocol"
+    },
+    {
+      "path": "./packages/sdk"
+    },
+    {
+      "path": "./plugins/debug"
+    },
+    {
+      "path": "./plugins/trivia"
+    },
+    {
+      "path": "./plugins/snake"
+    },
+    {
+      "path": "./apps/relay"
+    },
+    {
+      "path": "./apps/host"
+    },
+    {
+      "path": "./apps/mobile"
+    }
+  ]
+}
