@@ -2,6 +2,12 @@
 
 MVP-Monorepo fuer einen lokalen Multiplayer Game Hub mit Windows-Host, Mobile-Browser-Clients, Public Relay und Plugin-basierten Spielen.
 
+## Weiterfuehrende Doku
+
+- [Architecture Overview](docs/architecture-overview.md): Systembild, Datenfluesse, Fensterrollen, Plugin-Lifecycle und Trust-Boundaries
+- [Dev Guide](docs/dev-guide.md): Plugin-Workflow, wichtige Schnittstellen, Screen-Split, Ranking-Integration und Prompt Pack fuer Vibecoding
+- [Party-RPG Spec](docs/party-rpg-spec.md): Stages, public/private State, Actions, AI-Gateway, UX-Split und Fallbacks
+
 ## Struktur
 
 - `apps/relay`: Public Relay mit REST-Session-Create, WebSocket-Routing und Static-Serving fuer den Mobile-Client
@@ -11,7 +17,8 @@ MVP-Monorepo fuer einen lokalen Multiplayer Game Hub mit Windows-Host, Mobile-Br
 - `packages/sdk`: Gemeinsame Plugin-Typen fuer Manifest, Server-Hooks, Host-API und React-UIs
 - `plugins/debug`: Referenz-Plugin fuer Runtime- und UI-Wiring
 - `plugins/trivia`: Referenzspiel mit 5 Runden, Reveal, Scoreboard und Teamwertung
-- `plugins/snake`: Realtime-Referenzspiel mit autoritativem Tick, Reconnect-Respawn und Canvas-Central-View
+- `plugins/snake`: Realtime-Referenzspiel mit autoritativem Tick, Lobby-Board, Countdown-Start, Mobile-HUD-Minimap und Canvas-Central-View
+- `plugins/party-rpg`: Rundenbasiertes Party-Game mit Charakterphase, hostseitiger OpenRouter-Integration (`@game-hub/ai-gateway`), privat oeffentlicher State-Trennung und Hub-Results
 
 ## Dev Start
 
@@ -47,6 +54,10 @@ Fuer oeffentliche Join-Links im Dev-Setup sind diese Umgebungsvariablen relevant
 - `AUTH_FAILURE_RATE_LIMIT_MAX_ATTEMPTS`: Limit fuer wiederholte Join-/Reconnect-/Host-Auth-Fehler pro IP, Standard `20`
 - `AUTH_FAILURE_RATE_LIMIT_WINDOW_MS`: Zeitfenster fuer das Auth-Fehler-Limit, Standard `60000`
 - `ALLOW_UNTRUSTED_PLUGINS`: optionaler Override fuer nicht-first-party Plugins; Standard ist `false`
+- **Party-RPG / OpenRouter (nur Host-Prozess):**
+  - `OPENROUTER_API_KEY`: API-Key fuer KI-gestuetzte Texte (Charakterkurzfassung, Narration, Judge). Ohne Key nutzt das Plugin deterministische Fallbacks.
+  - `OPENROUTER_MODEL`: optionales Modell (z. B. `openai/gpt-4o-mini`). Standard falls nicht gesetzt: sinnvoller Default im AI-Gateway.
+  - `OPENROUTER_HTTP_REFERER` / `OPENROUTER_HTTP_TITLE`: optional fuer OpenRouter-Site-Header.
 Beispiel mit Tunnel:
 
 ```powershell
@@ -118,7 +129,7 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 
 ## Plugin Runtime
 
-- Der Host scannt `plugins/*`, laedt standardmaessig aber nur explizit vertraute First-Party-Plugins (`debug`, `snake`, `trivia`). Weitere Plugins werden nur mit `ALLOW_UNTRUSTED_PLUGINS=true` zugelassen.
+- Der Host scannt `plugins/*`, laedt standardmaessig aber nur explizit vertraute First-Party-Plugins (`debug`, `snake`, `trivia`, `party-rpg`). Weitere Plugins werden nur mit `ALLOW_UNTRUSTED_PLUGINS=true` zugelassen.
 - Geladene Plugins laufen im Host-Prozess und erhalten `GameHostApi`-Hooks fuer `onSessionCreated`, `onPlayerJoin`, `onPlayerLeave`, `onPlayerReconnect`, `onGameStart`, `onGameStop`, `onInput` und optional `onTick`.
 - Wenn ein Plugin `manifest.tickHz` setzt und `onTick` exportiert, startet der Host dafuer automatisch einen autoritativen Interval-Loop mit `1000 / tickHz` Millisekunden pro Tick.
 - `apps/mobile` mountet die mobile React-Komponente per dynamischer Import-Map auf Basis von `pluginId`.
@@ -163,32 +174,65 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 
 `plugins/snake` ist das Realtime-Referenzspiel fuer tick-basierte Plugins.
 
-- Grid: `40 x 24`
+- Grid: dynamische Round-Presets von `28 x 18` fuer 2 Spieler bis `72 x 40` fuer 12 Spieler; die Round-Map wird beim Start eingefroren
 - Tick-Rate: `12 Hz` ueber `manifest.tickHz`
 - Der Host ist autoritativ und verarbeitet pro Player die zuletzt eingegangene Richtungs-Eingabe vor dem naechsten Tick.
-- Kollision mit Wand oder einer Snake eliminiert die jeweilige Snake sofort.
-- Die Runde endet, sobald `0` oder `1` Snakes am Leben sind.
-- Reconnect waehrend `game_running` fuehrt im MVP zu einem Respawn auf einem sicheren Spawn-Slot.
+- Bereits in der Snake-Lobby werden alle verbundenen Spieler direkt auf dem Brett platziert und mit Name plus Farbe angezeigt.
+- Beim Start beginnt die Runde ueber einen synchronen Countdown `3 -> 2 -> 1 -> GO`.
+- Mode `standard`: zeitbasierte Runde mit `180s`, Sieger via Top-Score.
+- Mode `coinrush`: zeitbasierte Runde mit `120s`, Sieger ausschliesslich via `coinCount`; Food/Items/Respawn bleiben aktiv.
+- Die Mapgroesse und das aktive Round-Roster werden beim Start eingefroren; neue Joins waehrend `countdown`, `running` oder `game_over` zaehlen erst fuer die naechste Runde.
+- Namen bleiben nur in `lobby` und `countdown` sichtbar; waehrend `running` verschwindet das Labeling wieder fuer ein klares Spielfeld.
+- Movement nutzt Wrap-around statt Wandtod.
+- Food gibt immer `+1` Score und `+1` Laenge; Death-Drops werden bei Elimination als eigenes Drop-Food verteilt.
+- Respawn laeuft automatisch nach `2.5s`, mit `1.0s` Spawn-Schutz; geschuetzte Snakes koennen keine anderen Snakes toeten und werden durch Snake-Kollisionen nicht getoetet (Self-Collision bleibt toedlich).
+- Kill-Score gibt `+3` nur bei eindeutiger Fremdkoerper-Kollision (klarer Abschneide-Fall).
+- Coinrush spawnt Coins in Hotspot-Wellen (`announce` -> `active`) mit normal/gold Coins (`+1`/`+3`).
+- Optionales Event `Secret Quests`: pro Spieler genau 1 geheime Quest pro Runde, einmaliger Reward `+8 Score`; Reveal nur in `game_over`.
+- Die Runde endet bei Time-up; Gleichstand ist Draw.
 
 ### Snake Inputs
 
-- `direction`: Mobile-Input mit Payload `{ "dir": "up" | "down" | "left" | "right" }`
-- `action`: reservierter Mobile-Input mit Payload `{ "type": "boost" }`; im MVP noch ohne Gameplay-Effekt
+- `direction`: Mobile-Input mit Payload `{ "dir": "up" | "down" | "left" | "right" }`; kann waehrend des Countdowns bereits fuer den ersten Live-Turn vorgemerkt werden
+- `action`: reservierter Mobile-Input mit Payload `{ "type": "boost" }`; weiterhin optional, Kern-Gameplay laeuft ueber Tick-State
+- `snake_items_config`: Host-Action mit partieller Payload `{ boost?: boolean, magnet?: boolean, shield?: boolean }`; nur in `lobby` und `countdown` wirksam, fuer `running` eingefroren
+- `snake_mode_config`: Host-Action mit Payload `{ mode: "standard" | "coinrush" }`; nur in `lobby` und `countdown` wirksam, fuer `running` eingefroren
+- `snake_secret_quests_config`: Host-Action mit Payload `{ enabled: boolean }`; nur in `lobby` und `countdown` wirksam, fuer `running` eingefroren
 - `restart`: Host-Action ohne Payload. Startet aus dem Central-Screen sofort eine neue Runde.
 
 ### Snake Broadcast State
 
 `plugins/snake` broadcastet im `game_state.state.gameState` diese oeffentliche Form:
 
-- `stage`: `lobby | running | game_over`
+- `stage`: `lobby | countdown | running | game_over`
 - `tickHz`: konfigurierte Tick-Frequenz aus dem Manifest
 - `tick`: aktuelle Tick-Nummer innerhalb der laufenden Runde
 - `aliveCount`: Anzahl aktuell lebender Snakes
+- `countdownRemaining`: `3`, `2`, `1`, `0` fuer `GO!` oder `null`, sobald kein Countdown aktiv ist
+- `showIdentityLabels`: `true` in `lobby` und `countdown`, sonst `false`
+- `roundMode`: `standard | coinrush` (laufende/vorbereitete Runde)
+- `roundSecondsRemaining`: verbleibende Sekunden in der laufenden Runde oder `null`
 - `winnerPlayerId`: Gewinner der letzten Runde oder `null`
 - `winnerTeam`: Team des Gewinners oder `null`
 - `latestMessage`: kurze Statuszeile fuer Mobile- und Central-UI
 - `grid`: `{ width, height }`
-- `snakes`: Liste aller bekannten Spieler mit `playerId`, `name`, `team`, `connected`, `alive`, `direction`, `head`, `segments[]`, `color` und `wins`
+- `foods`: Liste mit `{ point, source }`, wobei `source` entweder `normal` oder `drop` ist
+- `items`: Liste mit `{ point, type }`, wobei `type` `boost | magnet | shield` ist
+- `coins`: Liste mit `{ point, type, value }`, wobei `type` `normal | gold` ist
+- `itemSettings`: aktive Lobby-/Countdown-Toggles `{ boost, magnet, shield }`
+- `secretQuestSettings`: Lobby-/Countdown-Toggle `{ enabled }`, in `running` eingefroren
+- `secretQuestRoundSummary`: nur in `game_over` gesetzt, sonst `null`; Liste `{ playerId, questType, completed, bonusAwarded }` pro Spieler mit zugewiesener Quest
+- `coinrush`: `null` ausserhalb Coinrush, sonst Wave-/Hotspot-Status `{ phase, phaseTicksRemaining, wave, announcedHotspots[], activeHotspots[] }`
+- `snakes`: Liste aller bekannten Spieler mit `playerId`, `name`, `team`, `connected`, `alive`, `direction`, `head`, `segments[]`, `color`, `score`, `coinCount`, `respawnTicksRemaining`, `spawnProtectionTicksRemaining`, `activeEffects[]`, `speedBank` und `wins`
+
+## Party-RPG (`party-rpg`)
+
+Turn-basiertes Party-Game: Charaktererstellung, kuratierte Situationen, private Antworten (nur host-intern bis zum Reveal), AI-Narration und Judge, Anbindung ans Hub-Ranking.
+
+- **Charakterphase:** Mobile-Client nutzt einen 5-Schritte-Wizard (Content-Registry, Comedy-Stil-Radar, Name/Slogan-Vorschläge). Profilsenden erfolgt per `submit_character_profile` mit optionalem `confirmReady: true` (Host wendet Speichern und Bereit in einem Schritt an); der separate Action `confirm_character_ready` bleibt kompatibel. Wizard-Zwischenstand kann pro Spieler in `sessionStorage` liegen und wird bei Abschluss oder Stage-Wechsel gelöscht.
+- **Doku:** [docs/party-rpg-spec.md](docs/party-rpg-spec.md) (Stages, Actions, Trust-Grenzen, Fallbacks).
+- **Module:** `plugins/party-rpg`, KI-Client: `packages/ai-gateway` (vom Host eingebunden).
+- **Broadcast-State:** Keine rohen Spielerantworten vor dem Showcase; nur freigegebene Texte und Metriken.
 
 ## Neues Plugin Anlegen
 
@@ -293,6 +337,10 @@ Praktisches Muster fuer neue Realtime-Plugins:
 - `corepack pnpm lint`
 
 `pnpm build` erzeugt die TypeScript-Artefakte sowie die Vite-Builds fuer `apps/mobile/dist` und `apps/host/dist/renderer`.
+
+
+
+
 
 
 

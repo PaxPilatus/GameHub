@@ -9,7 +9,12 @@ import {
   type GamePluginModuleLike,
 } from "@game-hub/sdk";
 
-const FIRST_PARTY_PLUGIN_IDS = new Set(["debug", "snake", "trivia"]);
+const FIRST_PARTY_PLUGIN_IDS = new Set([
+  "debug",
+  "party-rpg",
+  "snake",
+  "trivia",
+]);
 
 function defaultPluginsDir(): string {
   return resolve(fileURLToPath(new URL("../../../plugins/", import.meta.url)));

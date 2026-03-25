@@ -976,3 +976,159 @@ tbody td button {
     grid-column: 1 / -1;
   }
 }
+
+.snake-board-shell {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+}
+
+.snake-board-frame {
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+}
+
+.snake-board-viewport {
+  position: relative;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.snake-board-label-layer,
+.snake-countdown-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.snake-board-label {
+  position: absolute;
+  transform: translate(-50%, calc(-100% - 0.3rem));
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  padding: 0.28rem 0.58rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(8, 16, 24, 0.84);
+  color: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+  white-space: nowrap;
+}
+
+.snake-board-label-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  display: block;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.snake-board-label-text {
+  display: block;
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
+.snake-countdown-overlay {
+  display: grid;
+  place-items: center;
+}
+
+.snake-countdown-pill {
+  min-width: 6rem;
+  padding: 1rem 1.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 1.4rem;
+  background: rgba(8, 16, 24, 0.86);
+  color: #ffffff;
+  font-size: clamp(2.8rem, 10vw, 5rem);
+  font-weight: 800;
+  line-height: 1;
+  text-align: center;
+  box-shadow: 0 22px 44px rgba(0, 0, 0, 0.24);
+}
+
+.snake-countdown-pill-compact {
+  min-width: auto;
+  padding: 0.45rem 0.75rem;
+  font-size: 1.2rem;
+}
+
+.snake-central-fallback {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  gap: 0.35rem;
+  color: rgba(255, 255, 255, 0.82);
+  text-align: center;
+}
+
+.central-preview-frame .snake-board-label {
+  padding: 0.2rem 0.42rem;
+}
+
+.central-preview-frame .snake-board-label-text {
+  max-width: 6rem;
+  font-size: 0.66rem;
+}
+
+.central-preview-frame .snake-countdown-pill {
+  padding: 0.45rem 0.75rem;
+  font-size: 1.15rem;
+}
+
+.snake-central-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.55rem 0.8rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(8, 16, 24, 0.84);
+}
+
+.snake-mode-toggle-group {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+.snake-item-toggle-group {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.snake-item-toggle {
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(10, 24, 36, 0.75);
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.snake-item-toggle-enabled {
+  border-color: rgba(118, 237, 188, 0.65);
+  background: rgba(23, 84, 67, 0.8);
+  color: #ffffff;
+}
+
+.snake-toolbar-hints {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.18rem;
+}
+.snake-item-toggle-hint {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.78rem;
+}
+

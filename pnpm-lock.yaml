@@ -38,6 +38,12 @@ importers:
       prettier:
         specifier: ^3.5.2
         version: 3.8.1
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      react-dom:
+        specifier: ^18.3.1
+        version: 18.3.1(react@18.3.1)
       typescript:
         specifier: ^5.8.2
         version: 5.9.3
@@ -53,6 +59,9 @@ importers:
       '@game-hub/debug':
         specifier: workspace:*
         version: link:../../plugins/debug
+      '@game-hub/party-rpg':
+        specifier: workspace:*
+        version: link:../../plugins/party-rpg
       '@game-hub/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -93,6 +102,9 @@ importers:
       '@game-hub/debug':
         specifier: workspace:*
         version: link:../../plugins/debug
+      '@game-hub/party-rpg':
+        specifier: workspace:*
+        version: link:../../plugins/party-rpg
       '@game-hub/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -131,6 +143,12 @@ importers:
         specifier: ^3.24.2
         version: 3.25.76
 
+  packages/ai-gateway:
+    dependencies:
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
+
   packages/protocol:
     dependencies:
       zod:
@@ -148,6 +166,21 @@ importers:
 
   plugins/debug:
     dependencies:
+      '@game-hub/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@game-hub/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+
+  plugins/party-rpg:
+    dependencies:
+      '@game-hub/ai-gateway':
+        specifier: workspace:*
+        version: link:../../packages/ai-gateway
       '@game-hub/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol

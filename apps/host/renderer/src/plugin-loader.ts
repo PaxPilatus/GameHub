@@ -20,6 +20,10 @@ const pluginLoaders = {
     const pluginModule = (await import("@game-hub/trivia")) as unknown as GamePluginModuleLike;
     return resolveGamePlugin(pluginModule);
   },
+  "party-rpg": async () => {
+    const pluginModule = (await import("@game-hub/party-rpg")) as unknown as GamePluginModuleLike;
+    return resolveGamePlugin(pluginModule);
+  },
 } as const;
 
 export async function loadCentralPluginDefinition(

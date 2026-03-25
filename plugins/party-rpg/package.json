@@ -1,0 +1,21 @@
+{
+  "name": "@game-hub/party-rpg",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "dependencies": {
+    "@game-hub/ai-gateway": "workspace:*",
+    "@game-hub/protocol": "workspace:*",
+    "@game-hub/sdk": "workspace:*",
+    "react": "^18.3.1"
+  }
+}

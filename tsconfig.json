@@ -17,6 +17,12 @@
       "path": "./plugins/snake"
     },
     {
+      "path": "./packages/ai-gateway"
+    },
+    {
+      "path": "./plugins/party-rpg"
+    },
+    {
       "path": "./apps/relay"
     },
     {

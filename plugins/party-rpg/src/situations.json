@@ -1,0 +1,50 @@
+[
+  {
+    "id": "tavern_tax",
+    "title": "Stadtwache am Tresen",
+    "prompt": "Die Stadtwache verlangt ploetzlich 'Heldensteuer' auf euren kostenlosen Zwergenwein. Wie reagiert ihr?",
+    "tags": ["social", "chaos"]
+  },
+  {
+    "id": "bridge_troll",
+    "title": "Bruecken-Buerokratie",
+    "prompt": "Ein Troll verlangt Formular 7B in dreifacher Ausfertigung – in Drachenschrift. Was tun?",
+    "tags": ["puzzle", "absurd"]
+  },
+  {
+    "id": "dragon_hr",
+    "title": "Drachen-Personalabteilung",
+    "prompt": "Der Drache bietet eine Praktikumsstelle an – unbezahlt, aber mit 'exposure'. Wie verhandelt ihr?",
+    "tags": ["social"]
+  },
+  {
+    "id": "cursed_item",
+    "title": "Shop des Vertrauens",
+    "prompt": "Der Haendler schwoert, der Ring sei 'nur minimal' verflucht. Kauft ihr – und warum?",
+    "tags": ["risk"]
+  },
+  {
+    "id": "bard_off",
+    "title": "Barden-Battle",
+    "prompt": "Ein Bard fordert euch zum Rap-Battle um die Ehre der Taverne. Euer erster Punchline-Move?",
+    "tags": ["performance"]
+  },
+  {
+    "id": "map_wrong",
+    "title": "Falsche Schatzkarte",
+    "prompt": "Die Karte fuehrt in eine Baeckerei. Der Baeker behauptet, der Schatz sei 'heiss aus dem Ofen'. Was macht ihr?",
+    "tags": ["absurd"]
+  },
+  {
+    "id": "npc_romance",
+    "title": "NPC mit Gefuehlen",
+    "prompt": "Ein NPC erklaert euch Liebe – in Meta-Dialog. Wie geht ihr respektvoll und lustig damit um?",
+    "tags": ["social"]
+  },
+  {
+    "id": "trap_clumsy",
+    "title": "Fallen-Design",
+    "prompt": "Ihr findet eine Falle, die offensichtlich von einem Praktikanten gebaut wurde. Wie nutzt/verhindert ihr sie?",
+    "tags": ["chaos"]
+  }
+]

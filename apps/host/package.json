@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@game-hub/debug": "workspace:*",
+    "@game-hub/party-rpg": "workspace:*",
     "@game-hub/protocol": "workspace:*",
     "@game-hub/sdk": "workspace:*",
     "@game-hub/snake": "workspace:*",
