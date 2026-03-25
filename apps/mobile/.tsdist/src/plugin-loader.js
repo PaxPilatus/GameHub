@@ -12,6 +12,10 @@ const pluginLoaders = {
         const pluginModule = (await import("@game-hub/trivia"));
         return resolveGamePlugin(pluginModule);
     },
+    "party-rpg": async () => {
+        const pluginModule = (await import("@game-hub/party-rpg"));
+        return resolveGamePlugin(pluginModule);
+    },
 };
 export async function loadMobilePluginDefinition(pluginId) {
     const loader = pluginLoaders[pluginId];
