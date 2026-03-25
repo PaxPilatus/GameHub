@@ -1,15 +1,28 @@
 const { randomUUID } = require("node:crypto");
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, ipcMain } = require("electron");
+const electron = require("electron");
+const electronMain =
+  electron.app === undefined ? require("electron/main") : electron;
+const app = electronMain.app;
+const BrowserWindow = electronMain.BrowserWindow ?? electron.BrowserWindow;
+const ipcMain = electronMain.ipcMain ?? electron.ipcMain;
+const screen = electronMain.screen ?? electron.screen;
 
 const diagnostics = [];
+let centralWindow = null;
 let hostService = null;
 let mainWindow = null;
 let shutdownPromise = null;
 let shutdownRequested = false;
 let lastLoggedJoinUrl = null;
 let lastWarnedJoinUrl = null;
+let sanitizeDiagnosticEvent = (event) => event;
+let sanitizeHostSnapshot = (snapshot) => snapshot;
+let assertWindowAccess = () => undefined;
+let parseGameId = (value) => value;
+let parsePlayerId = (value) => value;
+let parsePluginAction = (action, payload) => ({ action, payload });
 
 function getHostService() {
   if (hostService === null) {
@@ -19,18 +32,36 @@ function getHostService() {
   return hostService;
 }
 
+function getTrackedWindows() {
+  return [mainWindow, centralWindow].filter(
+    (window) => window !== null && !window.isDestroyed(),
+  );
+}
+
+function getWindowKind(window) {
+  return window?.__hostWindowKind === "central" ? "central" : "admin";
+}
+
+function getSenderWindowKind(webContents) {
+  return getWindowKind(BrowserWindow.fromWebContents(webContents));
+}
+
 function pushDiagnostic(event) {
-  diagnostics.unshift(event);
+  const sanitizedEvent = sanitizeDiagnosticEvent(event);
+  diagnostics.unshift(sanitizedEvent);
   diagnostics.splice(200);
-  logDiagnostic(event);
-  if (mainWindow !== null) {
-    mainWindow.webContents.send("host:diagnostic", event);
+  logDiagnostic(sanitizedEvent);
+
+  for (const window of getTrackedWindows()) {
+    window.webContents.send("host:diagnostic", sanitizedEvent);
   }
 }
 
 function sendSnapshot(snapshot) {
-  if (mainWindow !== null) {
-    mainWindow.webContents.send("host:snapshot", snapshot);
+  const sanitizedSnapshot = sanitizeHostSnapshot(snapshot);
+
+  for (const window of getTrackedWindows()) {
+    window.webContents.send("host:snapshot", sanitizedSnapshot);
   }
 }
 
@@ -67,7 +98,28 @@ function recordDiagnostic(level, type, message, data) {
   pushDiagnostic(createDiagnostic(level, type, message, data));
 }
 
-function attachWindowDiagnostics(window) {
+function describeError(error) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return typeof error === "string" ? error : "Unknown error";
+}
+
+async function runProtectedIpcAction(channel, windowKind, action) {
+  try {
+    return await action();
+  } catch (error) {
+    recordDiagnostic("error", "ipc_action_failed", `${channel} failed.`, {
+      action: channel,
+      error: describeError(error),
+      windowKind,
+    });
+    return null;
+  }
+}
+
+function attachWindowDiagnostics(window, windowKind) {
   const { webContents } = window;
 
   webContents.on(
@@ -82,6 +134,7 @@ function attachWindowDiagnostics(window) {
           errorDescription,
           isMainFrame,
           validatedUrl,
+          windowKind,
         },
       );
     },
@@ -95,6 +148,7 @@ function attachWindowDiagnostics(window) {
       {
         exitCode: details.exitCode,
         reason: details.reason,
+        windowKind,
       },
     );
   });
@@ -109,7 +163,7 @@ function attachWindowDiagnostics(window) {
 
     if (diagnosticLevel === "info") {
       console.log(
-        `[renderer:console] ${details.message} (${details.sourceId}:${details.lineNumber})`,
+        `[renderer:${windowKind}] ${details.message} (${details.sourceId}:${details.lineNumber})`,
       );
       return;
     }
@@ -122,6 +176,7 @@ function attachWindowDiagnostics(window) {
         level: details.level,
         line: details.lineNumber,
         sourceId: details.sourceId,
+        windowKind,
       },
     );
   });
@@ -134,8 +189,16 @@ function attachWindowDiagnostics(window) {
       {
         preloadPath,
         stack: error.stack ?? null,
+        windowKind,
       },
     );
+  });
+}
+
+function hardenWindow(window) {
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event) => {
+    event.preventDefault();
   });
 }
 
@@ -152,7 +215,13 @@ function isLocalOnlyJoinUrl(joinUrl) {
   }
 }
 
-async function createWindow() {
+async function loadRendererWindow(window, view) {
+  await window.loadFile(join(__dirname, "dist", "renderer", "index.html"), {
+    query: { view },
+  });
+}
+
+async function createAdminWindow() {
   const window = new BrowserWindow({
     backgroundColor: "#f4f6f8",
     height: 960,
@@ -163,19 +232,112 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       preload: join(__dirname, "preload.cjs"),
+      sandbox: true,
+      webSecurity: true,
     },
     width: 1440,
   });
 
-  attachWindowDiagnostics(window);
-  await window.loadFile(join(__dirname, "dist", "renderer", "index.html"));
+  window.__hostWindowKind = "admin";
+  hardenWindow(window);
+  attachWindowDiagnostics(window, "admin");
+  await loadRendererWindow(window, "admin");
   return window;
 }
 
+function pickCentralDisplay() {
+  const displays = screen.getAllDisplays();
+  const primaryDisplay = screen.getPrimaryDisplay();
+
+  return displays.find((display) => display.id !== primaryDisplay.id) ?? primaryDisplay;
+}
+
+async function createCentralWindow() {
+  const display = pickCentralDisplay();
+  const window = new BrowserWindow({
+    autoHideMenuBar: true,
+    backgroundColor: "#09131b",
+    frame: false,
+    fullscreenable: true,
+    height: display.workArea.height,
+    show: false,
+    title: "Game Hub Central",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: join(__dirname, "preload.cjs"),
+      sandbox: true,
+      webSecurity: true,
+    },
+    width: display.workArea.width,
+    x: display.workArea.x,
+    y: display.workArea.y,
+  });
+
+  window.__hostWindowKind = "central";
+  hardenWindow(window);
+  attachWindowDiagnostics(window, "central");
+  await loadRendererWindow(window, "central");
+  return window;
+}
+
+async function ensureCentralWindow(options = {}) {
+  const { enterFullScreen = false, focus = false } = options;
+
+  if (centralWindow === null || centralWindow.isDestroyed()) {
+    centralWindow = await createCentralWindow();
+    centralWindow.on("closed", () => {
+      centralWindow = null;
+    });
+  }
+
+  if (!centralWindow.isVisible()) {
+    centralWindow.show();
+  }
+
+  if (enterFullScreen && !centralWindow.isFullScreen()) {
+    centralWindow.setFullScreen(true);
+  }
+
+  if (focus) {
+    centralWindow.focus();
+  }
+
+  return centralWindow;
+}
+
+async function closeCentralWindow() {
+  if (centralWindow === null || centralWindow.isDestroyed()) {
+    centralWindow = null;
+    return;
+  }
+
+  const window = centralWindow;
+  centralWindow = null;
+  window.close();
+}
+
+function toggleWindowFullscreen(window) {
+  if (window === null || window.isDestroyed()) {
+    return;
+  }
+
+  window.setFullScreen(!window.isFullScreen());
+}
+
 async function bootstrap() {
-  const { HostService } = await import(
-    pathToFileURL(resolve(__dirname, "dist", "host-service.js")).href
-  );
+  const [{ HostService }, securityModule, ipcPolicyModule] = await Promise.all([
+    import(pathToFileURL(resolve(__dirname, "dist", "host-service.js")).href),
+    import(pathToFileURL(resolve(__dirname, "dist", "security.js")).href),
+    import(pathToFileURL(resolve(__dirname, "dist", "ipc-policy.js")).href),
+  ]);
+  sanitizeDiagnosticEvent = securityModule.sanitizeDiagnosticEvent;
+  sanitizeHostSnapshot = securityModule.sanitizeHostSnapshot;
+  assertWindowAccess = ipcPolicyModule.assertWindowAccess;
+  parseGameId = ipcPolicyModule.parseGameId;
+  parsePlayerId = ipcPolicyModule.parsePlayerId;
+  parsePluginAction = ipcPolicyModule.parsePluginAction;
+
   hostService = new HostService(
     process.env.RELAY_BASE_URL === undefined
       ? {}
@@ -221,30 +383,95 @@ async function bootstrap() {
         ...event,
         data: { ...event.data },
       })),
-      snapshot: activeHostService.getSnapshot(),
+      snapshot: sanitizeHostSnapshot(activeHostService.getSnapshot()),
     };
   });
 
-  ipcMain.handle("host:restart-session", async () => {
-    await activeHostService.restartSession();
+  ipcMain.handle("host:close-central-window", async (event) => {
+    assertWindowAccess(
+      "host:close-central-window",
+      getSenderWindowKind(event.sender),
+      ["admin", "central"],
+    );
+    await closeCentralWindow();
   });
-  ipcMain.handle("host:select-game", async (_event, gameId) => {
-    await activeHostService.selectGame(gameId);
+  ipcMain.handle("host:open-central-window", async (event) => {
+    assertWindowAccess(
+      "host:open-central-window",
+      getSenderWindowKind(event.sender),
+      ["admin"],
+    );
+    await ensureCentralWindow({ focus: true });
   });
-  ipcMain.handle("host:send-plugin-action", async (_event, action, payload) => {
-    await activeHostService.sendPluginAction(action, payload);
+  ipcMain.handle("host:restart-game", async (event) => {
+    const windowKind = getSenderWindowKind(event.sender);
+    assertWindowAccess("host:restart-game", windowKind, ["admin", "central"]);
+    await runProtectedIpcAction("host:restart-game", windowKind, async () => {
+      await activeHostService.restartGame();
+
+      if (activeHostService.getSnapshot().lifecycle === "game_running") {
+        await ensureCentralWindow({ enterFullScreen: true, focus: true });
+      }
+    });
   });
-  ipcMain.handle("host:set-moderator", async (_event, playerId) => {
-    await activeHostService.setModerator(playerId);
+  ipcMain.handle("host:restart-session", async (event) => {
+    const windowKind = getSenderWindowKind(event.sender);
+    assertWindowAccess("host:restart-session", windowKind, ["admin"]);
+    await runProtectedIpcAction("host:restart-session", windowKind, async () => {
+      await activeHostService.restartSession();
+    });
   });
-  ipcMain.handle("host:start-game", async () => {
-    await activeHostService.startGame();
+  ipcMain.handle("host:select-game", async (event, gameId) => {
+    const windowKind = getSenderWindowKind(event.sender);
+    assertWindowAccess("host:select-game", windowKind, ["admin"]);
+    await runProtectedIpcAction("host:select-game", windowKind, async () => {
+      await activeHostService.selectGame(parseGameId(gameId));
+    });
   });
-  ipcMain.handle("host:stop-game", async () => {
-    await activeHostService.stopGame();
+  ipcMain.handle("host:send-plugin-action", async (event, action, payload) => {
+    const windowKind = getSenderWindowKind(event.sender);
+    assertWindowAccess("host:send-plugin-action", windowKind, ["admin"]);
+    await runProtectedIpcAction("host:send-plugin-action", windowKind, async () => {
+      const parsed = parsePluginAction(action, payload);
+      await activeHostService.sendPluginAction(parsed.action, parsed.payload);
+    });
+  });
+  ipcMain.handle("host:set-moderator", async (event, playerId) => {
+    const windowKind = getSenderWindowKind(event.sender);
+    assertWindowAccess("host:set-moderator", windowKind, ["admin"]);
+    await runProtectedIpcAction("host:set-moderator", windowKind, async () => {
+      await activeHostService.setModerator(parsePlayerId(playerId));
+    });
+  });
+  ipcMain.handle("host:start-game", async (event) => {
+    const windowKind = getSenderWindowKind(event.sender);
+    assertWindowAccess("host:start-game", windowKind, ["admin"]);
+    await runProtectedIpcAction("host:start-game", windowKind, async () => {
+      await activeHostService.startGame();
+
+      if (activeHostService.getSnapshot().lifecycle === "game_running") {
+        await ensureCentralWindow({ enterFullScreen: true, focus: true });
+      }
+    });
+  });
+  ipcMain.handle("host:stop-game", async (event) => {
+    const windowKind = getSenderWindowKind(event.sender);
+    assertWindowAccess("host:stop-game", windowKind, ["admin"]);
+    await runProtectedIpcAction("host:stop-game", windowKind, async () => {
+      await activeHostService.stopGame();
+    });
+  });
+  ipcMain.handle("host:toggle-current-window-fullscreen", async (event) => {
+    assertWindowAccess(
+      "host:toggle-current-window-fullscreen",
+      getSenderWindowKind(event.sender),
+      ["admin", "central"],
+    );
+    const window = BrowserWindow.fromWebContents(event.sender);
+    toggleWindowFullscreen(window);
   });
 
-  mainWindow = await createWindow();
+  mainWindow = await createAdminWindow();
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -290,12 +517,6 @@ app.on("before-quit", (event) => {
     app.quit();
   });
 });
-
-
-
-
-
-
 
 
 

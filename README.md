@@ -37,7 +37,16 @@ Fuer oeffentliche Join-Links im Dev-Setup sind diese Umgebungsvariablen relevant
 - `RELAY_PUBLIC_BASE_URL`: oeffentliche URL, die der Relay in `joinUrl` fuer Handys rendert
 - `RELAY_HOST`: Bind-Adresse des lokalen Relay-Prozesses, Standard `127.0.0.1`
 - `RELAY_PORT`: Port des lokalen Relay-Prozesses, Standard `8787`
-
+- `HOST_RATE_LIMIT_MAX_MESSAGES`: separates Host-Message-Budget fuer tick-basierte Spiele, Standard `600`
+- `HOST_RATE_LIMIT_WINDOW_MS`: Zeitfenster fuer das Host-Rate-Limit, Standard `10000`
+- `ALLOWED_WEB_ORIGINS`: komma-separierte Allowlist fuer Browser-WebSocket-Origins auf `/ws/mobile`
+- `CREATE_SESSION_RATE_LIMIT_MAX_REQUESTS`: Limit fuer `POST /api/session/create` pro IP, Standard `20`
+- `CREATE_SESSION_RATE_LIMIT_WINDOW_MS`: Zeitfenster fuer das Session-Create-Limit, Standard `60000`
+- `HANDSHAKE_RATE_LIMIT_MAX_ATTEMPTS`: Limit fuer WebSocket-Handshakes pro IP, Standard `120`
+- `HANDSHAKE_RATE_LIMIT_WINDOW_MS`: Zeitfenster fuer das Handshake-Limit, Standard `60000`
+- `AUTH_FAILURE_RATE_LIMIT_MAX_ATTEMPTS`: Limit fuer wiederholte Join-/Reconnect-/Host-Auth-Fehler pro IP, Standard `20`
+- `AUTH_FAILURE_RATE_LIMIT_WINDOW_MS`: Zeitfenster fuer das Auth-Fehler-Limit, Standard `60000`
+- `ALLOW_UNTRUSTED_PLUGINS`: optionaler Override fuer nicht-first-party Plugins; Standard ist `false`
 Beispiel mit Tunnel:
 
 ```powershell
@@ -54,12 +63,38 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 
 - Join-QR-Code fuer die Session-URL
 - Lobby mit Spielern, Rollen und Teams
-- Admin-Aktionen fuer Moderator, Game-Auswahl, Start und Stop
-- Central Plugin View aus dem aktuell geladenen Plugin
+- Admin-Aktionen fuer Moderator, Game-Auswahl, Start, Stop, `Restart Game` und `Restart Session (New Code)`
+- Central Plugin View aus dem aktuell geladenen Plugin plus ein separates Fullscreen-Central-Screen-Fenster beim Spielstart
+- Compact Central-Header mit Session-Meta, Player-Topliste und einer scrollfreien Game-Buehne, die den restlichen Bildschirm fuer das aktive Spiel reserviert
 - Diagnostics mit Connection-Status, Event-Stream und grober Latenzschaetzung
 
-## Oeffentliche Relay-URL
 
+## Session und Restart Verhalten
+
+- `Restart Game` behaelt `sessionId`, `joinUrl`, verbundene Spieler, Moderator und Relay-Verbindung bei.
+- `Restart Game` initialisiert nur das aktuell ausgewaehlte Spiel neu und startet direkt eine frische Runde desselben Spiels.
+- `Restart Session (New Code)` ist weiterhin der harte Reset: neue Session, neue Join-URL, neuer QR-Code.
+- Waehrend der Host gerade eine Session erstellt, zum Relay verbindet oder sauber schliesst, ist `Restart Session (New Code)` bewusst kurz blockiert, damit keine doppelten Lifecycle-Races entstehen.
+- Spielwechsel waehrend `game_running` ist absichtlich blockiert. Stoppe oder restarte zuerst die laufende Runde.
+- Der Central Screen wird beim `Start Game` oder `Restart Game` automatisch in einem zweiten Electron-Fenster geoeffnet und auf Fullscreen gesetzt. Falls ein zweiter Monitor vorhanden ist, wird er bevorzugt dort geoeffnet.
+- Der Admin-Host und der Central Screen koennen beide manuell auf Fullscreen umgeschaltet werden.
+
+## Relay Betriebsgrenzen
+
+- Der Relay bleibt in dieser Runde bewusst in-memory. Service-Restarts, Deploys oder Instanzwechsel terminieren laufende Sessions.
+- Render Free bleibt fuer Tests unterstuetzt, aber die Realtime-Logik ist nicht speziell auf den Free-Plan verdrahtet.
+- Fuer tick-basierte Spiele wie Snake gibt es ein separates Host-Rate-Limit, damit `game_state`-Broadcasts nicht mit denselben Grenzen wie Mobile-Traffic behandelt werden.
+
+## Security Defaults
+
+- Fuer oeffentliche Deployments sollte `PUBLIC_BASE_URL` immer gesetzt sein. Wenn es nicht gesetzt ist, erzeugt der Relay bewusst nur lokale/dev-sichere Join-Links aus der echten Listener-Adresse und ignoriert `Host`- sowie `X-Forwarded-*`-Header.
+- Mobile-WebSockets auf `/ws/mobile` akzeptieren nur Origins aus derselben Relay-Origin oder aus `ALLOWED_WEB_ORIGINS`.
+- Session-Erstellung, WebSocket-Handshakes und wiederholte Join-/Reconnect-Auth-Fehler werden separat pro IP limitiert.
+- Reconnect-Tokens bleiben auf Relay- und Mobile-Seite; der Host-Renderer bekommt weder Player-Tokens noch rohe Secret-Felder in Snapshots oder Diagnostics.
+- Statische Relay-Antworten setzen `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` und `frame-ancestors 'none'`.
+- Der Host beschraenkt Broadcasts auf relay-sichere `game_state`-Payload-Groessen. Uebergrosse Plugin-States werden verworfen und als Diagnostic geloggt.
+
+## Oeffentliche Relay-URL
 - Fuer Handys im Mobilfunknetz brauchst du eine oeffentliche URL fuer den Relay. Der QR-Code ist nur die Session-URL als Bild.
 - Das aktuelle Relay ist auf Root-Pfade ausgelegt: `/`, `/assets/*`, `/api/session/create`, `/ws/host` und `/ws/mobile`.
 - Darum ist ein eigenes Subdomain-Setup wie `https://hub.example.com/` oder `https://play.example.com/` die saubere Standardloesung.
@@ -75,7 +110,7 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 
 ## Mobile Reconnect
 
-- Nach einem erfolgreichen `hello_ack` speichert `apps/mobile` den `playerToken` in `localStorage` unter einem session-spezifischen Key.
+- Nach einem erfolgreichen `hello_ack` speichert `apps/mobile` den `playerToken` in einem versionierten, session-spezifischen Reconnect-Record im Browser-Storage. Der Record enthaelt auch `savedAt` und `expiresAt`, damit alte Tokens automatisch verworfen werden.
 - Beim Reload sendet der Client, falls vorhanden, denselben `playerToken` erneut im `hello` an den Relay.
 - Der Relay ordnet dadurch denselben `playerId` wieder zu und liefert `hello_ack.reconnect = true` zurueck.
 - Snake nutzt diesen Flow waehrend `game_running` fuer einen Respawn auf einem sicheren Spawn-Slot.
@@ -83,7 +118,7 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 
 ## Plugin Runtime
 
-- Der Host scannt `plugins/*` und liest jedes Plugin ueber sein exportiertes Manifest.
+- Der Host scannt `plugins/*`, laedt standardmaessig aber nur explizit vertraute First-Party-Plugins (`debug`, `snake`, `trivia`). Weitere Plugins werden nur mit `ALLOW_UNTRUSTED_PLUGINS=true` zugelassen.
 - Geladene Plugins laufen im Host-Prozess und erhalten `GameHostApi`-Hooks fuer `onSessionCreated`, `onPlayerJoin`, `onPlayerLeave`, `onPlayerReconnect`, `onGameStart`, `onGameStop`, `onInput` und optional `onTick`.
 - Wenn ein Plugin `manifest.tickHz` setzt und `onTick` exportiert, startet der Host dafuer automatisch einen autoritativen Interval-Loop mit `1000 / tickHz` Millisekunden pro Tick.
 - `apps/mobile` mountet die mobile React-Komponente per dynamischer Import-Map auf Basis von `pluginId`.
@@ -108,7 +143,7 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 
 ### Trivia Broadcast State
 
-`plugins/trivia` broadcastet im `game_state.state.pluginState` diese oeffentliche Form:
+`plugins/trivia` broadcastet im `game_state.state.gameState` diese oeffentliche Form:
 
 - `stage`: `lobby | question | reveal | results`
 - `questionNumber`: aktuelle 1-basierte Fragennummer, im Result-Screen `5`
@@ -143,7 +178,7 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 
 ### Snake Broadcast State
 
-`plugins/snake` broadcastet im `game_state.state.pluginState` diese oeffentliche Form:
+`plugins/snake` broadcastet im `game_state.state.gameState` diese oeffentliche Form:
 
 - `stage`: `lobby | running | game_over`
 - `tickHz`: konfigurierte Tick-Frequenz aus dem Manifest
@@ -188,7 +223,7 @@ function MobileView(props: GameMobileProps<MyState>) {
 }
 
 function CentralView(props: GameCentralProps<MyState>) {
-  return <div>{props.pluginState?.counter ?? 0}</div>;
+  return <div>{props.gameState?.counter ?? 0}</div>;
 }
 
 export const gamePlugin = createGamePlugin<MyState, number>({
@@ -258,6 +293,13 @@ Praktisches Muster fuer neue Realtime-Plugins:
 - `corepack pnpm lint`
 
 `pnpm build` erzeugt die TypeScript-Artefakte sowie die Vite-Builds fuer `apps/mobile/dist` und `apps/host/dist/renderer`.
+
+
+
+
+
+
+
 
 
 

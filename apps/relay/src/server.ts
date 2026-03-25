@@ -6,6 +6,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import type { Duplex } from "node:stream";
 import { extname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -40,8 +41,17 @@ const DEFAULT_MAX_MESSAGE_BYTES = 4 * 1024;
 const DEFAULT_MAX_BODY_BYTES = 1024;
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 10 * 1000;
 const DEFAULT_RATE_LIMIT_MAX_MESSAGES = 60;
+const DEFAULT_HOST_RATE_LIMIT_WINDOW_MS = 10 * 1000;
+const DEFAULT_HOST_RATE_LIMIT_MAX_MESSAGES = 600;
 const DEFAULT_INPUT_RATE_LIMIT_WINDOW_MS = 1000;
 const DEFAULT_INPUT_RATE_LIMIT_MAX_MESSAGES = 30;
+const DEFAULT_CREATE_SESSION_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const DEFAULT_CREATE_SESSION_RATE_LIMIT_MAX_REQUESTS = 20;
+const DEFAULT_HANDSHAKE_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const DEFAULT_HANDSHAKE_RATE_LIMIT_MAX_ATTEMPTS = 120;
+const DEFAULT_AUTH_FAILURE_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const DEFAULT_AUTH_FAILURE_RATE_LIMIT_MAX_ATTEMPTS = 20;
+const DEFAULT_INPUT_ORDER_VIOLATION_NOTIFY_INTERVAL_MS = 1000;
 const MAX_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const SESSION_CLOSE_CODE = 4001;
 const RATE_LIMIT_CLOSE_CODE = 4008;
@@ -67,14 +77,18 @@ interface RateLimitState {
 interface RelayConnection {
   inputRateLimit: RateLimitState;
   kind: RelaySocketKind;
+  lastInputOrderViolationAt: number | null;
   lastSeen: number;
+  lastClientSequence: number;
   playerId?: string;
   rateLimit: RateLimitState;
+  sequenceBase: number;
   sessionId: string;
   ws: WebSocket;
 }
 
 interface SessionPlayer {
+  lastAcceptedSequence: number;
   lastSeen: number;
   name: string;
   playerId: string;
@@ -103,11 +117,20 @@ export interface CreateSessionResponse {
 }
 
 export interface RelayServerOptions {
+  allowedWebOrigins?: string[];
+  authFailureRateLimitMaxAttempts?: number;
+  authFailureRateLimitWindowMs?: number;
   cleanupIntervalMs?: number;
+  createSessionRateLimitMaxRequests?: number;
+  createSessionRateLimitWindowMs?: number;
+  handshakeRateLimitMaxAttempts?: number;
+  handshakeRateLimitWindowMs?: number;
   handshakeTimeoutMs?: number;
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
   host?: string;
+  hostRateLimitMaxMessages?: number;
+  hostRateLimitWindowMs?: number;
   inputRateLimitMaxMessages?: number;
   inputRateLimitWindowMs?: number;
   maxBodyBytes?: number;
@@ -122,11 +145,20 @@ export interface RelayServerOptions {
 }
 
 interface NormalizedRelayServerOptions {
+  allowedWebOrigins: string[];
+  authFailureRateLimitMaxAttempts: number;
+  authFailureRateLimitWindowMs: number;
   cleanupIntervalMs: number;
+  createSessionRateLimitMaxRequests: number;
+  createSessionRateLimitWindowMs: number;
+  handshakeRateLimitMaxAttempts: number;
+  handshakeRateLimitWindowMs: number;
   handshakeTimeoutMs: number;
   heartbeatIntervalMs: number;
   heartbeatTimeoutMs: number;
   host: string;
+  hostRateLimitMaxMessages: number;
+  hostRateLimitWindowMs: number;
   inputRateLimitMaxMessages: number;
   inputRateLimitWindowMs: number;
   maxBodyBytes: number;
@@ -158,6 +190,8 @@ function describeHttpError(code: string): string {
   switch (code) {
     case "payload_too_large":
       return "Request payload is larger than the allowed limit.";
+    case "rate_limited":
+      return "Too many requests. Try again later.";
     default:
       return code.replaceAll("_", " ");
   }
@@ -216,20 +250,166 @@ function createRateLimitState(now: number): RateLimitState {
   };
 }
 
+function normalizeOrigin(value: string): string | null {
+  const trimmed = value.trim();
+
+  if (trimmed === "") {
+    return null;
+  }
+
+  try {
+    return new URL(trimmed).origin;
+  } catch {
+    return null;
+  }
+}
+
+function normalizePublicBaseUrl(value: string | undefined): string | null {
+  if (value === undefined) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+
+  if (trimmed === "") {
+    return null;
+  }
+
+  const url = new URL(trimmed);
+  url.hash = "";
+  return url.toString();
+}
+
+function normalizeAllowedWebOrigins(values: string[] | undefined): string[] {
+  if (values === undefined) {
+    return [];
+  }
+
+  const origins = new Set<string>();
+
+  for (const value of values) {
+    const normalized = normalizeOrigin(value);
+
+    if (normalized !== null) {
+      origins.add(normalized);
+    }
+  }
+
+  return [...origins];
+}
+
+function normalizeIpAddress(value: string | undefined): string {
+  if (value === undefined || value.trim() === "") {
+    return "unknown";
+  }
+
+  if (value.startsWith("::ffff:")) {
+    return value.slice("::ffff:".length);
+  }
+
+  return value;
+}
+
+function buildJoinUrlFromBaseUrl(baseUrl: string, sessionId: string): string {
+  const url = new URL(baseUrl);
+  url.hash = "";
+  url.search = "";
+  url.searchParams.set("sessionId", sessionId);
+  return url.toString();
+}
+
+function createCommonSecurityHeaders(): Record<string, string> {
+  return {
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+  };
+}
+
+function createStaticSecurityHeaders(contentType: string): Record<string, string> {
+  return {
+    ...createCommonSecurityHeaders(),
+    "content-security-policy": [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "connect-src 'self' ws: wss:",
+      "font-src 'self' data:",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+    ].join("; "),
+    "content-type": contentType,
+  };
+}
+
+function rejectUpgradeRequest(
+  socket: Duplex,
+  statusCode: number,
+  message: string,
+): void {
+  if (socket.destroyed) {
+    return;
+  }
+
+  const body = Buffer.from(message, "utf8");
+  const statusText =
+    statusCode === 403
+      ? "Forbidden"
+      : statusCode === 429
+        ? "Too Many Requests"
+        : "Bad Request";
+  socket.write(
+    [
+      `HTTP/1.1 ${statusCode} ${statusText}`,
+      "Connection: close",
+      "Content-Type: text/plain; charset=utf-8",
+      `Content-Length: ${body.byteLength}`,
+      "",
+      message,
+    ].join("\r\n"),
+  );
+  socket.destroy();
+}
+
 export class RelayServer {
+  private readonly authFailureRateLimits = new Map<string, RateLimitState>();
+  private readonly createSessionRateLimits = new Map<string, RateLimitState>();
   private readonly hostWss = new WebSocketServer({ noServer: true });
   private readonly mobileWss = new WebSocketServer({ noServer: true });
   private readonly options: NormalizedRelayServerOptions;
   private readonly server = createServer((request, response) => {
     void this.handleHttpRequest(request, response);
   });
+  private readonly websocketHandshakeRateLimits = new Map<string, RateLimitState>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private readonly sessions = new Map<string, SessionRecord>();
 
   constructor(options: RelayServerOptions = {}) {
     this.options = {
+      allowedWebOrigins: normalizeAllowedWebOrigins(options.allowedWebOrigins),
+      authFailureRateLimitMaxAttempts:
+        options.authFailureRateLimitMaxAttempts ??
+        DEFAULT_AUTH_FAILURE_RATE_LIMIT_MAX_ATTEMPTS,
+      authFailureRateLimitWindowMs:
+        options.authFailureRateLimitWindowMs ??
+        DEFAULT_AUTH_FAILURE_RATE_LIMIT_WINDOW_MS,
       cleanupIntervalMs:
         options.cleanupIntervalMs ?? DEFAULT_CLEANUP_INTERVAL_MS,
+      createSessionRateLimitMaxRequests:
+        options.createSessionRateLimitMaxRequests ??
+        DEFAULT_CREATE_SESSION_RATE_LIMIT_MAX_REQUESTS,
+      createSessionRateLimitWindowMs:
+        options.createSessionRateLimitWindowMs ??
+        DEFAULT_CREATE_SESSION_RATE_LIMIT_WINDOW_MS,
+      handshakeRateLimitMaxAttempts:
+        options.handshakeRateLimitMaxAttempts ??
+        DEFAULT_HANDSHAKE_RATE_LIMIT_MAX_ATTEMPTS,
+      handshakeRateLimitWindowMs:
+        options.handshakeRateLimitWindowMs ??
+        DEFAULT_HANDSHAKE_RATE_LIMIT_WINDOW_MS,
       handshakeTimeoutMs:
         options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS,
       heartbeatIntervalMs:
@@ -237,6 +417,10 @@ export class RelayServer {
       heartbeatTimeoutMs:
         options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS,
       host: options.host ?? DEFAULT_HOST,
+      hostRateLimitMaxMessages:
+        options.hostRateLimitMaxMessages ?? DEFAULT_HOST_RATE_LIMIT_MAX_MESSAGES,
+      hostRateLimitWindowMs:
+        options.hostRateLimitWindowMs ?? DEFAULT_HOST_RATE_LIMIT_WINDOW_MS,
       inputRateLimitMaxMessages:
         options.inputRateLimitMaxMessages ?? DEFAULT_INPUT_RATE_LIMIT_MAX_MESSAGES,
       inputRateLimitWindowMs:
@@ -254,16 +438,33 @@ export class RelayServer {
       sessionTtlMs: options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS,
     };
 
-    this.hostWss.on("connection", (ws: WebSocket) => {
-      this.attachHostSocket(ws);
+    this.hostWss.on("connection", (ws: WebSocket, request: IncomingMessage) => {
+      this.attachHostSocket(ws, request);
     });
 
-    this.mobileWss.on("connection", (ws: WebSocket) => {
-      this.attachMobileSocket(ws);
+    this.mobileWss.on("connection", (ws: WebSocket, request: IncomingMessage) => {
+      this.attachMobileSocket(ws, request);
     });
 
     this.server.on("upgrade", (request, socket, head) => {
       const pathname = this.getRequestPathname(request);
+      const now = this.options.now();
+      const clientIp = this.getClientIp(request);
+
+      if (!this.allowIpRateLimit(
+        this.websocketHandshakeRateLimits,
+        clientIp,
+        now,
+        this.options.handshakeRateLimitWindowMs,
+        this.options.handshakeRateLimitMaxAttempts,
+      )) {
+        this.log("websocket_handshake_rate_limited", {
+          ip: clientIp,
+          pathname,
+        });
+        rejectUpgradeRequest(socket, 429, "Too many websocket handshakes.");
+        return;
+      }
 
       if (pathname === "/ws/host") {
         this.hostWss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
@@ -273,6 +474,15 @@ export class RelayServer {
       }
 
       if (pathname === "/ws/mobile") {
+        if (!this.isAllowedMobileOrigin(request)) {
+          this.log("mobile_origin_rejected", {
+            ip: clientIp,
+            origin: Array.isArray(request.headers.origin) ? request.headers.origin.join(",") : request.headers.origin ?? "missing",
+          });
+          rejectUpgradeRequest(socket, 403, "WebSocket origin is not allowed.");
+          return;
+        }
+
         this.mobileWss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
           this.mobileWss.emit("connection", ws, request);
         });
@@ -358,8 +568,22 @@ export class RelayServer {
     return rateLimit.messageCount <= maxMessages;
   }
 
-  private attachHostSocket(ws: WebSocket): void {
+  private allowIpRateLimit(
+    states: Map<string, RateLimitState>,
+    ip: string,
+    now: number,
+    windowMs: number,
+    maxMessages: number,
+  ): boolean {
+    const state = states.get(ip) ?? createRateLimitState(now);
+    const allowed = this.allowRateLimit(state, now, windowMs, maxMessages);
+    states.set(ip, state);
+    return allowed;
+  }
+
+  private attachHostSocket(ws: WebSocket, request: IncomingMessage): void {
     const handshakeStartedAt = this.options.now();
+    const clientIp = this.getClientIp(request);
     const rateLimit = createRateLimitState(handshakeStartedAt);
     const inputRateLimit = createRateLimitState(handshakeStartedAt);
 
@@ -373,7 +597,27 @@ export class RelayServer {
     ws.on("message", (data: RawData) => {
       const now = this.options.now();
 
-      if (!this.allowRateLimit(rateLimit, now, this.options.rateLimitWindowMs, this.options.rateLimitMaxMessages)) {
+      if (this.isAuthFailureRateLimited(clientIp, now)) {
+        this.rejectSocket(
+          ws,
+          RATE_LIMIT_CLOSE_CODE,
+          "rate_limited",
+          "Too many authentication failures. Try again later.",
+        );
+        return;
+      }
+
+      if (
+        !this.allowRateLimit(
+          rateLimit,
+          now,
+          this.options.hostRateLimitWindowMs,
+          this.options.hostRateLimitMaxMessages,
+        )
+      ) {
+        this.log("host_rate_limited", {
+          sessionId: session?.sessionId ?? "unknown",
+        });
         this.rejectSocket(ws, RATE_LIMIT_CLOSE_CODE, "rate_limited", "Rate limit exceeded.");
         return;
       }
@@ -396,17 +640,20 @@ export class RelayServer {
         const nextSession = this.sessions.get(hello.sessionId) ?? null;
 
         if (nextSession === null) {
+          this.recordAuthFailure(clientIp, now, "session_not_found");
           this.rejectSocket(ws, NOT_FOUND_CLOSE_CODE, "session_not_found", "Session not found.");
           return;
         }
 
         if (this.isSessionExpired(nextSession, now)) {
+          this.recordAuthFailure(clientIp, now, "session_expired");
           this.terminateSession(nextSession, "session_expired");
           this.rejectSocket(ws, NOT_FOUND_CLOSE_CODE, "session_expired", "Session expired.");
           return;
         }
 
         if (nextSession.hostSecret !== hello.token) {
+          this.recordAuthFailure(clientIp, now, "invalid_host_secret");
           this.rejectSocket(ws, AUTH_CLOSE_CODE, "invalid_host_secret", "Invalid host secret.");
           return;
         }
@@ -423,8 +670,11 @@ export class RelayServer {
         connection = {
           inputRateLimit,
           kind: "host",
+          lastInputOrderViolationAt: null,
           lastSeen: now,
+          lastClientSequence: 0,
           rateLimit,
+          sequenceBase: 0,
           sessionId: session.sessionId,
           ws,
         };
@@ -443,9 +693,7 @@ export class RelayServer {
           if (player.socket !== null) {
             this.sendMessage(
               ws,
-              this.createPlayerJoined(player.playerId, player.name, {
-                playerToken: player.playerToken,
-              }),
+              this.createPlayerJoined(player.playerId, player.name),
             );
           }
         }
@@ -521,8 +769,9 @@ export class RelayServer {
     });
   }
 
-  private attachMobileSocket(ws: WebSocket): void {
+  private attachMobileSocket(ws: WebSocket, request: IncomingMessage): void {
     const handshakeStartedAt = this.options.now();
+    const clientIp = this.getClientIp(request);
     const rateLimit = createRateLimitState(handshakeStartedAt);
     const inputRateLimit = createRateLimitState(handshakeStartedAt);
 
@@ -536,7 +785,28 @@ export class RelayServer {
     ws.on("message", (data: RawData) => {
       const now = this.options.now();
 
-      if (!this.allowRateLimit(rateLimit, now, this.options.rateLimitWindowMs, this.options.rateLimitMaxMessages)) {
+      if (this.isAuthFailureRateLimited(clientIp, now)) {
+        this.rejectSocket(
+          ws,
+          RATE_LIMIT_CLOSE_CODE,
+          "rate_limited",
+          "Too many authentication failures. Try again later.",
+        );
+        return;
+      }
+
+      if (
+        !this.allowRateLimit(
+          rateLimit,
+          now,
+          this.options.rateLimitWindowMs,
+          this.options.rateLimitMaxMessages,
+        )
+      ) {
+        this.log("mobile_rate_limited", {
+          playerId: connection?.playerId ?? "unknown",
+          sessionId: session?.sessionId ?? "unknown",
+        });
         this.rejectSocket(ws, RATE_LIMIT_CLOSE_CODE, "rate_limited", "Rate limit exceeded.");
         return;
       }
@@ -559,11 +829,13 @@ export class RelayServer {
         const nextSession = this.sessions.get(hello.sessionId) ?? null;
 
         if (nextSession === null) {
+          this.recordAuthFailure(clientIp, now, "session_not_found");
           this.rejectSocket(ws, NOT_FOUND_CLOSE_CODE, "session_not_found", "Session not found.");
           return;
         }
 
         if (this.isSessionExpired(nextSession, now)) {
+          this.recordAuthFailure(clientIp, now, "session_expired");
           this.terminateSession(nextSession, "session_expired");
           this.rejectSocket(ws, NOT_FOUND_CLOSE_CODE, "session_expired", "Session expired.");
           return;
@@ -572,6 +844,7 @@ export class RelayServer {
         const connectedPlayer = this.registerMobilePlayer(nextSession, ws, hello, now);
 
         if (connectedPlayer === null) {
+          this.recordAuthFailure(clientIp, now, "invalid_player_token");
           this.rejectSocket(ws, AUTH_CLOSE_CODE, "invalid_player_token", "Invalid player token.");
           return;
         }
@@ -580,9 +853,12 @@ export class RelayServer {
         connection = {
           inputRateLimit,
           kind: "mobile",
+          lastInputOrderViolationAt: null,
           lastSeen: now,
+          lastClientSequence: 0,
           playerId: connectedPlayer.player.playerId,
           rateLimit,
+          sequenceBase: connectedPlayer.player.lastAcceptedSequence,
           sessionId: session.sessionId,
           ws,
         };
@@ -624,7 +900,6 @@ export class RelayServer {
               connectedPlayer.player.playerId,
               connectedPlayer.player.name,
               {
-                playerToken: connectedPlayer.player.playerToken,
                 reconnect: connectedPlayer.reconnect,
               },
             ),
@@ -669,6 +944,25 @@ export class RelayServer {
         return;
       }
 
+      const playerId = connection.playerId;
+      const player = playerId === undefined ? undefined : session.players.get(playerId);
+
+      if (player === undefined) {
+        this.sendMessage(
+          ws,
+          this.createError(
+            "player_not_registered",
+            "Player is not registered for this session.",
+          ),
+        );
+        return;
+      }
+
+      if (!this.isInputInOrder(player, connection, inputResult.data)) {
+        this.notifyInputOutOfOrder(session, connection, inputResult.data.sequence, now);
+        return;
+      }
+
       const hostConnection = session.hostConnection;
 
       if (hostConnection === null || hostConnection.ws.readyState !== WebSocket.OPEN) {
@@ -682,9 +976,14 @@ export class RelayServer {
         return;
       }
 
+      const effectiveSequence = connection.sequenceBase + inputResult.data.sequence;
+      connection.lastClientSequence = inputResult.data.sequence;
+      player.lastAcceptedSequence = effectiveSequence;
+
       const normalizedInput: InputMessage = {
         ...inputResult.data,
         playerId: connection.playerId ?? inputResult.data.playerId,
+        sequence: effectiveSequence,
       };
 
       this.sendMessage(hostConnection.ws, normalizedInput);
@@ -791,7 +1090,6 @@ export class RelayServer {
     playerId: string,
     playerName: string,
     details: {
-      playerToken?: string;
       reconnect?: boolean;
     } = {},
   ): PlayerJoinedMessage {
@@ -801,9 +1099,6 @@ export class RelayServer {
       playerName,
       sentAt: this.options.now(),
       type: "player_joined",
-      ...(details.playerToken === undefined
-        ? {}
-        : { playerToken: details.playerToken }),
       ...(details.reconnect === undefined
         ? {}
         : { reconnect: details.reconnect }),
@@ -825,10 +1120,9 @@ export class RelayServer {
 
   private createSession(
     ttlMs: number,
-    request: IncomingMessage,
   ): CreateSessionResponse {
-    const sessionId = randomBytes(6).toString("hex");
-    const hostSecret = randomBytes(18).toString("hex");
+    const sessionId = randomBytes(8).toString("hex");
+    const hostSecret = randomBytes(24).toString("hex");
     const now = this.options.now();
     const expiresAt = now + ttlMs;
 
@@ -847,7 +1141,7 @@ export class RelayServer {
     return {
       expiresAt,
       hostSecret,
-      joinUrl: this.buildJoinUrl(request, sessionId),
+      joinUrl: this.buildJoinUrl(sessionId),
       sessionId,
       ttlMs,
     };
@@ -879,29 +1173,55 @@ export class RelayServer {
     return null;
   }
 
-  private buildJoinUrl(request: IncomingMessage, sessionId: string): string {
+  private buildJoinUrl(sessionId: string): string {
     if (this.options.publicBaseUrl !== null) {
       return buildJoinUrlFromBaseUrl(this.options.publicBaseUrl, sessionId);
     }
 
-    const host = request.headers.host ?? `localhost:${this.options.port}`;
-    const forwardedProtocol = request.headers["x-forwarded-proto"];
-    const protocol =
-      typeof forwardedProtocol === "string"
-        ? forwardedProtocol.split(",")[0]?.trim() || "http"
-        : "http";
+    return buildJoinUrlFromBaseUrl(this.getLocalBaseUrl(), sessionId);
+  }
 
-    return buildJoinUrlFromBaseUrl(`${protocol}://${host}/`, sessionId);
+  private getLocalBaseUrl(): string {
+    const address = this.server.address();
+    const port =
+      address !== null && typeof address !== "string"
+        ? address.port
+        : this.options.port;
+    const rawHost =
+      address !== null && typeof address !== "string"
+        ? address.address
+        : this.options.host;
+    const host =
+      rawHost === "0.0.0.0" || rawHost === "::" || rawHost === ""
+        ? "127.0.0.1"
+        : rawHost === "::1"
+          ? "localhost"
+          : rawHost;
+
+    return `http://${host}:${port}/`;
   }
 
   private async handleCreateSession(
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> {
+    const now = this.options.now();
+    const clientIp = this.getClientIp(request);
+
+    if (!this.allowIpRateLimit(
+      this.createSessionRateLimits,
+      clientIp,
+      now,
+      this.options.createSessionRateLimitWindowMs,
+      this.options.createSessionRateLimitMaxRequests,
+    )) {
+      throw new RequestError(429, "rate_limited");
+    }
+
     const payload = await this.readJsonBody(request);
     const parsed = CreateSessionRequestSchema.parse(payload);
     const ttlMs = parsed.ttlMs ?? this.options.sessionTtlMs;
-    const session = this.createSession(ttlMs, request);
+    const session = this.createSession(ttlMs);
 
     this.writeJson(response, 201, session);
   }
@@ -1049,6 +1369,91 @@ export class RelayServer {
     }
   }
 
+  private isAllowedMobileOrigin(request: IncomingMessage): boolean {
+    const originHeader = request.headers.origin;
+
+    if (typeof originHeader !== "string") {
+      return false;
+    }
+
+    const normalizedOrigin = normalizeOrigin(originHeader);
+
+    if (normalizedOrigin === null) {
+      return false;
+    }
+
+    const allowedOrigins = this.getAllowedWebOrigins();
+    return allowedOrigins.includes(normalizedOrigin);
+  }
+
+  private getAllowedWebOrigins(): string[] {
+    const origins = new Set(this.options.allowedWebOrigins);
+
+    if (this.options.publicBaseUrl !== null) {
+      origins.add(new URL(this.options.publicBaseUrl).origin);
+    }
+
+    const localBaseUrl = this.getLocalBaseUrl();
+    const localUrl = new URL(localBaseUrl);
+    origins.add(localUrl.origin);
+
+    if (localUrl.hostname === "127.0.0.1") {
+      origins.add(`http://localhost:${localUrl.port}`);
+    }
+
+    if (localUrl.hostname === "localhost") {
+      origins.add(`http://127.0.0.1:${localUrl.port}`);
+    }
+
+    return [...origins];
+  }
+
+  private isAuthFailureRateLimited(ip: string, now: number): boolean {
+    const state = this.authFailureRateLimits.get(ip);
+
+    if (state === undefined) {
+      return false;
+    }
+
+    if (now - state.windowStartedAt >= this.options.authFailureRateLimitWindowMs) {
+      this.authFailureRateLimits.delete(ip);
+      return false;
+    }
+
+    return state.messageCount >= this.options.authFailureRateLimitMaxAttempts;
+  }
+
+  private recordAuthFailure(ip: string, now: number, reason: string): void {
+    const state = this.authFailureRateLimits.get(ip) ?? createRateLimitState(now);
+
+    if (now - state.windowStartedAt >= this.options.authFailureRateLimitWindowMs) {
+      state.windowStartedAt = now;
+      state.messageCount = 0;
+    }
+
+    state.messageCount += 1;
+    state.lastViolationAt = now;
+    this.authFailureRateLimits.set(ip, state);
+
+    this.log("auth_failure", {
+      ip,
+      reason,
+    });
+  }
+
+  private isInputInOrder(
+    player: SessionPlayer,
+    connection: RelayConnection,
+    message: InputMessage,
+  ): boolean {
+    if (message.sequence <= connection.lastClientSequence) {
+      return false;
+    }
+
+    const effectiveSequence = connection.sequenceBase + message.sequence;
+    return effectiveSequence > player.lastAcceptedSequence;
+  }
+
   private isSessionExpired(session: SessionRecord, now: number): boolean {
     return session.expiresAt <= now;
   }
@@ -1057,33 +1462,37 @@ export class RelayServer {
     console.log(`[relay] ${event} ${JSON.stringify(details)}`);
   }
 
+
   private parseSocketPayload(ws: WebSocket, data: RawData): unknown | null {
     const buffer = rawDataToBuffer(data);
 
-    if (buffer.length > this.options.maxMessageBytes) {
-      this.rejectSocket(ws, PROTOCOL_CLOSE_CODE, "message_too_large", "Message too large.");
+    if (buffer.byteLength > this.options.maxMessageBytes) {
+      this.rejectSocket(
+        ws,
+        PROTOCOL_CLOSE_CODE,
+        "payload_too_large",
+        "Message exceeds the maximum allowed size.",
+      );
       return null;
     }
 
     try {
       return JSON.parse(buffer.toString("utf8")) as unknown;
     } catch {
-      this.rejectSocket(ws, PROTOCOL_CLOSE_CODE, "invalid_json", "Invalid JSON payload.");
+      this.rejectSocket(ws, PROTOCOL_CLOSE_CODE, "invalid_json", "Message is not valid JSON.");
       return null;
     }
   }
 
   private async readJsonBody(request: IncomingMessage): Promise<unknown> {
     const chunks: Buffer[] = [];
-    let totalLength = 0;
+    let totalBytes = 0;
 
     for await (const chunk of request) {
-      const buffer = Buffer.isBuffer(chunk)
-        ? chunk
-        : Buffer.from(String(chunk));
-      totalLength += buffer.length;
+      const buffer = typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk);
+      totalBytes += buffer.byteLength;
 
-      if (totalLength > this.options.maxBodyBytes) {
+      if (totalBytes > this.options.maxBodyBytes) {
         throw new RequestError(413, "payload_too_large");
       }
 
@@ -1116,8 +1525,8 @@ export class RelayServer {
         existingPlayer.socket.readyState === WebSocket.OPEN
       ) {
         existingPlayer.socket.close(
-          SESSION_CLOSE_CODE,
-          closeReason("reconnected from another device"),
+          CONFLICT_CLOSE_CODE,
+          closeReason("reconnected from another client"),
         );
       }
 
@@ -1130,10 +1539,11 @@ export class RelayServer {
     }
 
     const player: SessionPlayer = {
+      lastAcceptedSequence: 0,
       lastSeen: now,
-      name: hello.name?.trim() || `Player ${session.players.size + 1}`,
+      name: hello.name ?? `Player ${session.players.size + 1}`,
       playerId: `player_${randomBytes(4).toString("hex")}`,
-      playerToken: randomBytes(12).toString("hex"),
+      playerToken: randomBytes(16).toString("hex"),
       socket: ws,
     };
 
@@ -1147,25 +1557,47 @@ export class RelayServer {
   private notifyInputRateLimited(
     session: SessionRecord,
     connection: RelayConnection,
-    now: number,
+    _now: number,
   ): void {
-    if (
-      connection.inputRateLimit.lastViolationAt !== null &&
-      now - connection.inputRateLimit.lastViolationAt < 1000
-    ) {
-      return;
-    }
-
-    connection.inputRateLimit.lastViolationAt = now;
     this.log("mobile_input_rate_limited", {
       playerId: connection.playerId ?? "unknown",
       sessionId: session.sessionId,
     });
+
+    this.sendMessage(
+      connection.ws,
+      this.createError("rate_limited", "Input rate limit exceeded."),
+    );
+  }
+
+  private notifyInputOutOfOrder(
+    session: SessionRecord,
+    connection: RelayConnection,
+    attemptedSequence: number,
+    now: number,
+  ): void {
+    const shouldNotify =
+      connection.lastInputOrderViolationAt === null ||
+      now - connection.lastInputOrderViolationAt >=
+        DEFAULT_INPUT_ORDER_VIOLATION_NOTIFY_INTERVAL_MS;
+
+    connection.lastInputOrderViolationAt = now;
+
+    if (!shouldNotify) {
+      return;
+    }
+
+    this.log("mobile_input_out_of_order", {
+      attemptedSequence: String(attemptedSequence),
+      playerId: connection.playerId ?? "unknown",
+      sessionId: session.sessionId,
+    });
+
     this.sendMessage(
       connection.ws,
       this.createError(
-        "input_rate_limited",
-        `Too many input messages. Limit is ${this.options.inputRateLimitMaxMessages} per second.`,
+        "input_out_of_order",
+        "Input sequence must be strictly increasing.",
       ),
     );
   }
@@ -1179,6 +1611,11 @@ export class RelayServer {
     if (ws.readyState === WebSocket.OPEN) {
       this.sendMessage(ws, this.createError(errorCode, message));
       ws.close(closeCode, closeReason(message));
+      return;
+    }
+
+    if (ws.readyState === WebSocket.CONNECTING) {
+      ws.terminate();
     }
   }
 
@@ -1187,45 +1624,47 @@ export class RelayServer {
     response: ServerResponse,
     pathname: string,
   ): Promise<void> {
-    if (!existsSync(this.options.mobileDistDir)) {
-      this.writeJson(response, 503, {
-        error: "mobile_build_missing",
-        message: "Mobile build is missing. Run the build before serving static assets.",
-      });
-      return;
-    }
+    const normalizedPath = pathname === "/" ? "/index.html" : pathname;
+    let assetPath = resolve(this.options.mobileDistDir, `.${normalizedPath}`);
+    const relativePath = relative(this.options.mobileDistDir, assetPath);
 
-    const relativePath = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
-    const filePath = resolve(this.options.mobileDistDir, relativePath);
-    const escapedPath = relative(this.options.mobileDistDir, filePath);
-
-    if (escapedPath.startsWith("..")) {
-      this.writeJson(response, 403, {
-        error: "forbidden",
-        message: "Requested asset is outside the mobile build directory.",
-      });
-      return;
-    }
-
-    if (!existsSync(filePath)) {
+    if (relativePath.startsWith("..")) {
       this.writeJson(response, 404, {
         error: "not_found",
-        message: "Static asset not found.",
+        message: "Asset not found.",
       });
       return;
     }
 
-    const file = await readFile(filePath);
-    response.writeHead(200, {
-      "content-type": contentTypeForPath(filePath),
-    });
+    if (!existsSync(assetPath)) {
+      if (extname(normalizedPath) === "") {
+        assetPath = resolve(this.options.mobileDistDir, "index.html");
+      } else {
+        this.writeJson(response, 404, {
+          error: "not_found",
+          message: "Asset not found.",
+        });
+        return;
+      }
+    }
 
-    if (request.method === "HEAD") {
-      response.end();
+    const body = await readFile(assetPath);
+    const contentType = contentTypeForPath(assetPath);
+    const headers = {
+      ...createStaticSecurityHeaders(contentType),
+      "cache-control": contentType.startsWith("text/html")
+        ? "no-store"
+        : "public, max-age=31536000, immutable",
+    };
+
+    response.writeHead(200, headers);
+
+    if (request.method !== "HEAD") {
+      response.end(body);
       return;
     }
 
-    response.end(file);
+    response.end();
   }
 
   private sendMessage(ws: WebSocket, message: unknown): void {
@@ -1241,32 +1680,32 @@ export class RelayServer {
       return;
     }
 
-    const terminationMessage = this.createSessionTerminated(session.sessionId, reason);
+    this.sessions.delete(session.sessionId);
+    session.expiresAt = this.options.now();
 
     this.log("session_terminated", {
       reason,
       sessionId: session.sessionId,
     });
 
-    if (
-      session.hostConnection !== null &&
-      session.hostConnection.ws.readyState === WebSocket.OPEN
-    ) {
-      this.sendMessage(session.hostConnection.ws, terminationMessage);
-      session.hostConnection.ws.close(SESSION_CLOSE_CODE, closeReason(reason));
+    const terminatedMessage = this.createSessionTerminated(session.sessionId, reason);
+    const hostConnection = session.hostConnection;
+    session.hostConnection = null;
+
+    if (hostConnection !== null && hostConnection.ws.readyState === WebSocket.OPEN) {
+      this.sendMessage(hostConnection.ws, terminatedMessage);
+      hostConnection.ws.close(SESSION_CLOSE_CODE, closeReason(reason));
     }
 
     for (const player of session.players.values()) {
-      if (player.socket !== null && player.socket.readyState === WebSocket.OPEN) {
-        this.sendMessage(player.socket, terminationMessage);
-        player.socket.close(SESSION_CLOSE_CODE, closeReason(reason));
-      }
-
+      const playerSocket = player.socket;
       player.socket = null;
-    }
 
-    session.hostConnection = null;
-    this.sessions.delete(session.sessionId);
+      if (playerSocket !== null && playerSocket.readyState === WebSocket.OPEN) {
+        this.sendMessage(playerSocket, terminatedMessage);
+        playerSocket.close(SESSION_CLOSE_CODE, closeReason(reason));
+      }
+    }
   }
 
   private touchConnection(
@@ -1287,10 +1726,11 @@ export class RelayServer {
   }
 
   private getRequestPathname(request: IncomingMessage): string {
-    return new URL(
-      request.url ?? "/",
-      `http://${request.headers.host ?? "localhost"}`,
-    ).pathname;
+    return new URL(request.url ?? "/", "http://relay.local").pathname;
+  }
+
+  private getClientIp(request: IncomingMessage): string {
+    return normalizeIpAddress(request.socket.remoteAddress);
   }
 
   private writeJson(
@@ -1298,43 +1738,20 @@ export class RelayServer {
     statusCode: number,
     payload: unknown,
   ): void {
+    const body = Buffer.from(JSON.stringify(payload), "utf8");
     response.writeHead(statusCode, {
+      ...createCommonSecurityHeaders(),
+      "cache-control": "no-store",
+      "content-length": String(body.byteLength),
+      "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
       "content-type": "application/json; charset=utf-8",
     });
-    response.end(JSON.stringify(payload));
+    response.end(body);
   }
 }
-function buildJoinUrlFromBaseUrl(baseUrl: string, sessionId: string): string {
-  const url = new URL(baseUrl);
-  url.hash = "";
-  url.search = "";
-  url.searchParams.set("sessionId", sessionId);
-  return url.toString();
-}
-
-function normalizePublicBaseUrl(value: string | undefined): string | null {
-  if (value === undefined) {
-    return null;
-  }
-
-  const trimmed = value.trim();
-
-  if (trimmed === "") {
-    return null;
-  }
-
-  const url = new URL(trimmed);
-  url.hash = "";
-  return url.toString();
-}
-
 
 export function createRelayServer(options: RelayServerOptions = {}): RelayServer {
   return new RelayServer(options);
 }
-
-
-
-
 
 

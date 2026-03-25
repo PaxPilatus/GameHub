@@ -26,7 +26,38 @@ describe("HubMessageSchema", () => {
     expect(message.protocolVersion).toBe(PROTOCOL_VERSION);
   });
 
-  it("accepts a game state payload", () => {
+  it("normalizes player-facing names", () => {
+    const result = safeParseHubMessage({
+      clientKind: "mobile",
+      id: "msg-mobile",
+      name: "  Alice   Smith  ",
+      protocolVersion: PROTOCOL_VERSION,
+      sentAt: 2,
+      sessionId: "session-1",
+      type: "hello",
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.name).toBe("Alice Smith");
+    }
+  });
+
+  it("rejects overlong player-facing names", () => {
+    const result = safeParseHubMessage({
+      clientKind: "mobile",
+      id: "msg-mobile",
+      name: "x".repeat(49),
+      protocolVersion: PROTOCOL_VERSION,
+      sentAt: 2,
+      sessionId: "session-1",
+      type: "hello",
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts a game state payload envelope", () => {
     const result = safeParseHubMessage({
       id: "msg-state",
       sentAt: 2,
@@ -40,9 +71,39 @@ describe("HubMessageSchema", () => {
         },
       ],
       state: {
-        questionIndex: 3,
-        scores: {
-          p1: 10,
+        gameState: {
+          questionIndex: 3,
+          scores: {
+            p1: 10,
+          },
+        },
+        hubState: {
+          joinUrl: "https://relay.example/?sessionId=session-1",
+          lastRelayMessageAt: 12,
+          leaderboard: [],
+          lifecycle: "lobby",
+          matchStatus: {
+            message: null,
+            state: "idle",
+            title: null,
+          },
+          moderatorId: "p1",
+          overlay: null,
+          players: [
+            {
+              connected: true,
+              lastSeen: 12,
+              name: "Alice",
+              playerId: "p1",
+              role: "moderator",
+              team: "A",
+            },
+          ],
+          relayStatus: "connected",
+          selectedGame: "trivia",
+          sessionId: "session-1",
+          statusBadges: [],
+          updatedAt: 12,
         },
       },
     });
@@ -69,23 +130,39 @@ describe("HubMessageSchema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("parses host state payload snapshots", () => {
+  it("parses host state payload snapshots from the new envelope", () => {
     const result = safeParseHostStatePayload({
-      lifecycle: "lobby",
-      moderatorId: "player-1",
-      players: [
-        {
-          connected: true,
-          lastSeen: 10,
-          name: "Alice",
-          playerId: "player-1",
-          role: "moderator",
-          team: "A",
+      gameState: {
+        round: 1,
+      },
+      hubState: {
+        joinUrl: "https://relay.example/?sessionId=session-1",
+        lastRelayMessageAt: 10,
+        leaderboard: [],
+        lifecycle: "lobby",
+        matchStatus: {
+          message: null,
+          state: "idle",
+          title: null,
         },
-      ],
-      relayStatus: "connected",
-      selectedGame: "trivia",
-      sessionId: "session-1",
+        moderatorId: "player-1",
+        overlay: null,
+        players: [
+          {
+            connected: true,
+            lastSeen: 10,
+            name: "Alice",
+            playerId: "player-1",
+            role: "moderator",
+            team: "A",
+          },
+        ],
+        relayStatus: "connected",
+        selectedGame: "trivia",
+        sessionId: "session-1",
+        statusBadges: [],
+        updatedAt: 10,
+      },
     });
 
     expect(result.success).toBe(true);

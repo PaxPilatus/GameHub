@@ -3,7 +3,7 @@ import type { GameMobileProps } from "@game-hub/sdk";
 import type { TriviaState } from "./reducer.js";
 
 export function TriviaMobileView(props: GameMobileProps<TriviaState>) {
-  const state = props.pluginState;
+  const state = asTriviaState(props.gameState);
   const hasAnswered =
     props.playerId !== null &&
     state?.answeredPlayerIds.includes(props.playerId) === true;
@@ -107,7 +107,7 @@ export function TriviaMobileView(props: GameMobileProps<TriviaState>) {
             <div key={entry.playerId} className="trivia-score-row">
               <div>
                 <strong>{entry.name}</strong>
-                <span>Team {entry.team} · {entry.connected ? "online" : "offline"}</span>
+                <span>Team {entry.team} / {entry.connected ? "online" : "offline"}</span>
               </div>
               <strong>{entry.score}</strong>
             </div>
@@ -116,6 +116,45 @@ export function TriviaMobileView(props: GameMobileProps<TriviaState>) {
       </section>
     </div>
   );
+}
+
+function asTriviaState(value: unknown): TriviaState | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  if (
+    (value.stage !== "lobby" &&
+      value.stage !== "question" &&
+      value.stage !== "reveal" &&
+      value.stage !== "results") ||
+    !Array.isArray(value.answeredPlayerIds) ||
+    !Array.isArray(value.scores) ||
+    !Array.isArray(value.teamScores)
+  ) {
+    return null;
+  }
+
+  if (
+    !isNullableQuestionView(value.currentQuestion) ||
+    !isNullableRoundSummary(value.lastRoundSummary)
+  ) {
+    return null;
+  }
+
+  return value as TriviaState;
+}
+
+function isNullableQuestionView(value: unknown): boolean {
+  return value === null || (isRecord(value) && typeof value.prompt === "string" && Array.isArray(value.options));
+}
+
+function isNullableRoundSummary(value: unknown): boolean {
+  return value === null || (isRecord(value) && Array.isArray(value.responses));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 export default TriviaMobileView;

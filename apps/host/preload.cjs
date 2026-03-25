@@ -12,6 +12,9 @@ function createSubscription(channel, listener) {
 }
 
 contextBridge.exposeInMainWorld("hostApi", {
+  closeCentralWindow() {
+    return ipcRenderer.invoke("host:close-central-window");
+  },
   getInitialState() {
     return ipcRenderer.invoke("host:get-initial-state");
   },
@@ -20,6 +23,12 @@ contextBridge.exposeInMainWorld("hostApi", {
   },
   onSnapshot(listener) {
     return createSubscription("host:snapshot", listener);
+  },
+  openCentralWindow() {
+    return ipcRenderer.invoke("host:open-central-window");
+  },
+  restartGame() {
+    return ipcRenderer.invoke("host:restart-game");
   },
   restartSession() {
     return ipcRenderer.invoke("host:restart-session");
@@ -39,6 +48,7 @@ contextBridge.exposeInMainWorld("hostApi", {
   stopGame() {
     return ipcRenderer.invoke("host:stop-game");
   },
+  toggleCurrentWindowFullscreen() {
+    return ipcRenderer.invoke("host:toggle-current-window-fullscreen");
+  },
 });
-
-

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentType } from "react";
+import React, { useEffect, useMemo, useState, type ComponentType } from "react";
 
 import type { InputValue } from "@game-hub/protocol";
 import type {
@@ -14,18 +14,27 @@ import type {
 } from "@game-hub/sdk";
 import QRCode from "qrcode";
 
+import {
+  buildCentralLeaderboard,
+  type CentralLeaderboardEntry,
+} from "./central-leaderboard.js";
 import { loadCentralPluginComponent } from "./plugin-loader.js";
 
 const DIAGNOSTICS_LIMIT = 200;
 
 type HostApi = Window["hostApi"];
+type HostWindowKind = "admin" | "central";
+type CopyStatus = "copied" | "failed" | "idle";
 
 export function App() {
+  const windowKind = useMemo(() => resolveWindowKind(), []);
   const [availableGames, setAvailableGames] = useState<GameManifest[]>([]);
   const [diagnostics, setDiagnostics] = useState<HostDiagnosticEvent[]>([]);
   const [fatalError, setFatalError] = useState<string | null>(null);
+  const [loadedGameId, setLoadedGameId] = useState<string | null>(null);
   const [pluginLoadError, setPluginLoadError] = useState<string | null>(null);
   const [pluginQrCode, setPluginQrCode] = useState<string>("");
+  const [copyStatus, setCopyStatus] = useState<CopyStatus>("idle");
   const [snapshot, setSnapshot] = useState<HostSnapshot | null>(null);
   const [CentralComponent, setCentralComponent] = useState<ComponentType<
     GameCentralProps<Record<string, unknown>>
@@ -45,7 +54,8 @@ export function App() {
     let detachSnapshot = () => {};
     let detachDiagnostic = () => {};
 
-    void hostApi.getInitialState()
+    void hostApi
+      .getInitialState()
       .then((initialState) => {
         if (disposed) {
           return;
@@ -81,7 +91,32 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (snapshot?.joinUrl === null || snapshot?.joinUrl === undefined) {
+    document.body.classList.toggle("central-window-body", windowKind === "central");
+    return () => {
+      document.body.classList.remove("central-window-body");
+    };
+  }, [windowKind]);
+
+  useEffect(() => {
+    if (copyStatus === "idle") {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setCopyStatus("idle");
+    }, 1_600);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [copyStatus]);
+
+  useEffect(() => {
+    if (
+      windowKind !== "admin" ||
+      snapshot?.joinUrl === null ||
+      snapshot?.joinUrl === undefined
+    ) {
       setPluginQrCode("");
       return;
     }
@@ -89,7 +124,7 @@ export function App() {
     let active = true;
     void QRCode.toDataURL(snapshot.joinUrl, {
       margin: 1,
-      width: 280,
+      width: 196,
     })
       .then((dataUrl) => {
         if (active) {
@@ -105,24 +140,38 @@ export function App() {
     return () => {
       active = false;
     };
+  }, [snapshot?.joinUrl, windowKind]);
+
+  useEffect(() => {
+    setCopyStatus("idle");
   }, [snapshot?.joinUrl]);
 
   useEffect(() => {
-    if (snapshot?.selectedGame === null || snapshot?.selectedGame === undefined) {
+    const nextGameId = snapshot?.selectedGame ?? null;
+
+    if (nextGameId === null) {
       setCentralComponent(null);
+      setLoadedGameId(null);
       setPluginLoadError(null);
       return;
     }
 
     let active = true;
-    void loadCentralPluginComponent(snapshot.selectedGame)
+    setCentralComponent(null);
+    setLoadedGameId(null);
+    setPluginLoadError(null);
+
+    void loadCentralPluginComponent(nextGameId)
       .then((component) => {
         if (!active) {
           return;
         }
 
+        setLoadedGameId(nextGameId);
         setCentralComponent(() => component);
-        setPluginLoadError(component === null ? `No central UI registered for ${snapshot.selectedGame}.` : null);
+        setPluginLoadError(
+          component === null ? `No central UI registered for ${nextGameId}.` : null,
+        );
       })
       .catch((error: unknown) => {
         if (!active) {
@@ -130,7 +179,10 @@ export function App() {
         }
 
         setCentralComponent(null);
-        setPluginLoadError(error instanceof Error ? error.message : "Failed to load plugin UI.");
+        setLoadedGameId(null);
+        setPluginLoadError(
+          error instanceof Error ? error.message : "Failed to load plugin UI.",
+        );
       });
 
     return () => {
@@ -169,20 +221,99 @@ export function App() {
 
   const players = snapshot.players.map((player) => toGamePlayer(player));
   const averageLatencyMs = calculateAverageLatency(snapshot.players);
+  const centralLeaderboard = buildCentralLeaderboard(snapshot);
   const joinUrlWarning =
     snapshot.joinUrl === null ? null : getJoinUrlWarning(snapshot.joinUrl);
-  const hostState =
-    snapshot.sessionId === null
-      ? null
-      : {
-          lifecycle: snapshot.lifecycle,
-          moderatorId: snapshot.moderatorId,
-          players,
-          pluginState: snapshot.pluginState,
-          relayStatus: snapshot.relayStatus,
-          selectedGame: snapshot.selectedGame,
-          sessionId: snapshot.sessionId,
-        };
+  const hubSession =
+    snapshot.sessionId === null ? null : toHubSession(snapshot, players);
+  const canSelectGame = snapshot.lifecycle !== "game_running";
+  const canStartSelectedGame =
+    snapshot.selectedGame !== null &&
+    (snapshot.lifecycle === "lobby" || snapshot.lifecycle === "game_finished");
+  const canRestartSelectedGame =
+    snapshot.selectedGame !== null &&
+    (snapshot.lifecycle === "lobby" ||
+      snapshot.lifecycle === "game_running" ||
+      snapshot.lifecycle === "game_finished");
+  const canRestartSession =
+    snapshot.lifecycle !== "closing" &&
+    snapshot.relayStatus !== "creating_session" &&
+    snapshot.relayStatus !== "connecting";
+  const selectedGameLabel = resolveGameLabel(availableGames, snapshot.selectedGame);
+  const handleCopyJoinUrl = () => {
+    if (snapshot.joinUrl === null) {
+      return;
+    }
+
+    void copyTextToClipboard(snapshot.joinUrl)
+      .then(() => {
+        setCopyStatus("copied");
+      })
+      .catch(() => {
+        setCopyStatus("failed");
+      });
+  };
+
+  const centralView = renderCentralView({
+    CentralComponent,
+    hubSession,
+    loadedGameId,
+    players,
+    pluginLoadError,
+    setFatalError,
+    snapshot,
+    windowKind,
+  });
+
+  if (windowKind === "central") {
+    return (
+      <main className="central-shell">
+        <header className="central-toolbar">
+          <div className="central-toolbar-meta">
+            <p className="eyebrow">Game Hub Central</p>
+            <div className="central-toolbar-title-row">
+              <h1>{selectedGameLabel}</h1>
+              <span className="central-phase-pill">
+                {formatLifecycleLabel(snapshot.lifecycle)}
+              </span>
+            </div>
+            <p className="central-toolbar-subtitle">
+              Session {snapshot.sessionId ?? "pending"} / Relay {snapshot.relayStatus}
+            </p>
+          </div>
+          <CentralPlayerStrip entries={centralLeaderboard} />
+          <div className="toolbar-actions central-toolbar-actions">
+            <button
+              type="button"
+              disabled={!canRestartSelectedGame}
+              onClick={() => invokeHostAction(setFatalError, (hostApi) => hostApi.restartGame())}
+            >
+              Restart Game
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                invokeHostAction(setFatalError, (hostApi) =>
+                  hostApi.toggleCurrentWindowFullscreen(),
+                )
+              }
+            >
+              Toggle Fullscreen
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                invokeHostAction(setFatalError, (hostApi) => hostApi.closeCentralWindow())
+              }
+            >
+              Close Central Screen
+            </button>
+          </div>
+        </header>
+        <section className="central-stage-panel">{centralView}</section>
+      </main>
+    );
+  }
 
   return (
     <main className="host-shell">
@@ -196,28 +327,47 @@ export function App() {
                 <img alt="Join QR code" src={pluginQrCode} />
               )}
             </div>
-            <div>
-              <p className="eyebrow">Game Hub Host</p>
-              <h1>Central Screen + Admin</h1>
-              <p className="hint-copy">
-                {snapshot.joinUrl === null
-                  ? "Creating join URL..."
-                  : `Players join via ${snapshot.joinUrl}`}
-              </p>
+            <div className="hero-copy-block">
+              <div className="hero-heading">
+                <p className="eyebrow">Game Hub Host</p>
+                <h1>Central Screen + Admin</h1>
+              </div>
+              <JoinUrlBlock
+                copyStatus={copyStatus}
+                joinUrl={snapshot.joinUrl}
+                onCopy={handleCopyJoinUrl}
+              />
               {joinUrlWarning === null ? null : (
                 <div className="warning-callout">
                   <strong>Public reachability warning</strong>
                   <p>{joinUrlWarning}</p>
                 </div>
               )}
+              <div className="hero-actions">
+                <button
+                  type="button"
+                  onClick={() =>
+                    invokeHostAction(setFatalError, (hostApi) => hostApi.openCentralWindow())
+                  }
+                >
+                  Open Central Screen
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    invokeHostAction(setFatalError, (hostApi) =>
+                      hostApi.toggleCurrentWindowFullscreen(),
+                    )
+                  }
+                >
+                  Fullscreen Host
+                </button>
+              </div>
               <div className="status-grid">
                 <StatusCard label="Session" value={snapshot.sessionId ?? "pending"} />
                 <StatusCard label="Connection" value={snapshot.relayStatus} />
                 <StatusCard label="Lifecycle" value={snapshot.lifecycle} />
-                <StatusCard
-                  label="Selected Game"
-                  value={resolveGameLabel(availableGames, snapshot.selectedGame)}
-                />
+                <StatusCard label="Selected Game" value={selectedGameLabel} />
                 <StatusCard label="Moderator" value={resolveModeratorName(snapshot)} />
                 <StatusCard label="Avg Latency" value={formatLatency(averageLatencyMs)} />
               </div>
@@ -225,24 +375,24 @@ export function App() {
           </div>
         </section>
 
-        <section className="panel">
+        <section className="panel admin-panel">
           <div className="panel-header">
             <div>
               <h2>Admin</h2>
               <p className="hint-copy">
-                Plugin selection, moderator and lifecycle control stay host-authoritative.
+                Host-owned controls for selection, lifecycle and resets.
               </p>
             </div>
-            <button type="button" onClick={() => invokeHostAction((hostApi) => hostApi.restartSession())}>
-              Restart Session
-            </button>
           </div>
-          <div className="actions-grid">
+          <div className="admin-toolbar">
             <select
+              disabled={!canSelectGame}
               value={snapshot.selectedGame ?? ""}
               onChange={(event) => {
                 if (event.target.value !== "") {
-                  invokeHostAction((hostApi) => hostApi.selectGame(event.target.value));
+                  invokeHostAction(setFatalError, (hostApi) =>
+                    hostApi.selectGame(event.target.value),
+                  );
                 }
               }}
             >
@@ -255,31 +405,45 @@ export function App() {
             </select>
             <button
               type="button"
-              disabled={
-                snapshot.selectedGame === null ||
-                (snapshot.lifecycle !== "lobby" &&
-                  snapshot.lifecycle !== "game_finished")
-              }
-              onClick={() => invokeHostAction((hostApi) => hostApi.startGame())}
+              disabled={!canStartSelectedGame}
+              onClick={() => invokeHostAction(setFatalError, (hostApi) => hostApi.startGame())}
             >
-              Start Game
+              Start
             </button>
             <button
               type="button"
               disabled={snapshot.lifecycle !== "game_running"}
-              onClick={() => invokeHostAction((hostApi) => hostApi.stopGame())}
+              onClick={() => invokeHostAction(setFatalError, (hostApi) => hostApi.stopGame())}
             >
-              Stop Game
+              Stop
+            </button>
+            <button
+              type="button"
+              disabled={!canRestartSelectedGame}
+              onClick={() =>
+                invokeHostAction(setFatalError, (hostApi) => hostApi.restartGame())
+              }
+            >
+              Restart Game
+            </button>
+            <button
+              type="button"
+              disabled={!canRestartSession}
+              onClick={() =>
+                invokeHostAction(setFatalError, (hostApi) => hostApi.restartSession())
+              }
+            >
+              Restart Session
             </button>
           </div>
         </section>
 
-        <section className="panel">
+        <section className="panel lobby-panel">
           <div className="panel-header">
             <div>
               <h2>Lobby</h2>
               <p className="hint-copy">
-                Players, teams and roles are read from the host session store.
+                Players, teams and roles come from the authoritative host session.
               </p>
             </div>
             <span className="badge">{snapshot.players.length} players</span>
@@ -315,7 +479,11 @@ export function App() {
                         <button
                           type="button"
                           disabled={player.role === "moderator"}
-                          onClick={() => invokeHostAction((hostApi) => hostApi.setModerator(player.playerId))}
+                          onClick={() =>
+                            invokeHostAction(setFatalError, (hostApi) =>
+                              hostApi.setModerator(player.playerId),
+                            )
+                          }
                         >
                           Set Moderator
                         </button>
@@ -333,52 +501,29 @@ export function App() {
         <section className="panel central-panel">
           <div className="panel-header">
             <div>
-              <h2>Central Plugin View</h2>
+              <h2>Central Preview</h2>
               <p className="hint-copy">
-                Mounted dynamically from the selected plugin export.
+                Small live preview of the selected central scene.
               </p>
             </div>
             <span className="badge">{snapshot.selectedGame ?? "none"}</span>
           </div>
-          {snapshot.selectedGame === null ? (
-            <p className="hint-copy">Select a game to mount its central UI.</p>
-          ) : pluginLoadError !== null ? (
-            <p className="error-copy">{pluginLoadError}</p>
-          ) : CentralComponent === null ? (
-            <p className="hint-copy">Loading plugin UI...</p>
-          ) : (
-            <CentralComponent
-              hostState={hostState}
-              invokeHostAction={(action: string, payload?: InputValue) => {
-                invokeHostAction((hostApi) => hostApi.sendPluginAction(action, payload));
-              }}
-              phase={snapshot.lifecycle}
-              players={players}
-              pluginState={snapshot.pluginState}
-              relayStatus={snapshot.relayStatus}
-              sessionId={snapshot.sessionId}
-            />
-          )}
+          <div className="central-preview-frame">{centralView}</div>
         </section>
 
         <section className="panel diagnostics-panel">
           <div className="panel-header">
             <div>
               <h2>Diagnostics</h2>
-              <p className="hint-copy">Last {DIAGNOSTICS_LIMIT} host events. Latency is estimated from client timestamps to host receipt.</p>
+              <p className="hint-copy">
+                Last {DIAGNOSTICS_LIMIT} host events. Latest entries stay visible; structured payloads open on demand.
+              </p>
             </div>
-            <span className="badge">{`${diagnostics.length} events · ${formatLatency(averageLatencyMs)}`}</span>
+            <span className="badge">{`${diagnostics.length} events / ${formatLatency(averageLatencyMs)}`}</span>
           </div>
           <div className="diagnostics-list">
             {diagnostics.map((event) => (
-              <article key={event.id} className={`diag diag-${event.level}`}>
-                <header>
-                  <strong>{event.type}</strong>
-                  <span>{formatTime(event.timestamp)}</span>
-                </header>
-                <p>{event.message}</p>
-                <pre>{JSON.stringify(event.data, null, 2)}</pre>
-              </article>
+              <DiagnosticEventCard key={event.id} event={event} />
             ))}
           </div>
         </section>
@@ -391,26 +536,168 @@ export function App() {
     setDiagnostics(initialState.diagnostics);
     setSnapshot(initialState.snapshot);
   }
+}
 
-  function invokeHostAction(action: (hostApi: HostApi) => Promise<void>): void {
-    const hostApi = getHostApi();
+interface RenderCentralViewParams {
+  CentralComponent: ComponentType<GameCentralProps<Record<string, unknown>>> | null;
+  hubSession: GameCentralProps<Record<string, unknown>>["hubSession"];
+  loadedGameId: string | null;
+  players: GamePlayerSnapshot[];
+  pluginLoadError: string | null;
+  setFatalError: (value: string | null) => void;
+  snapshot: HostSnapshot;
+  windowKind: HostWindowKind;
+}
 
-    if (hostApi === null) {
-      setFatalError(
-        "Host controls are unavailable because the preload bridge did not initialize.",
-      );
-      return;
-    }
+function renderCentralView(params: RenderCentralViewParams) {
+  const {
+    CentralComponent,
+    hubSession,
+    loadedGameId,
+    players,
+    pluginLoadError,
+    setFatalError,
+    snapshot,
+    windowKind,
+  } = params;
 
-    void action(hostApi).catch((error: unknown) => {
-      setFatalError(
-        formatFatalError(
-          error,
-          "Failed to send a command to the Electron main process.",
-        ),
-      );
-    });
+  if (snapshot.selectedGame === null) {
+    return renderCentralPlaceholder(
+      windowKind,
+      windowKind === "central"
+        ? "Select and start a game from the host admin window to populate the central screen."
+        : "Select a game to mount its central UI.",
+    );
   }
+
+  if (pluginLoadError !== null) {
+    return renderCentralPlaceholder(windowKind, pluginLoadError, "error");
+  }
+
+  if (CentralComponent === null || loadedGameId !== snapshot.selectedGame) {
+    return renderCentralPlaceholder(windowKind, "Loading plugin UI...");
+  }
+
+  return (
+    <CentralComponent
+      gameState={snapshot.gameState}
+      hubSession={hubSession}
+      invokeHostAction={(action: string, payload?: InputValue) => {
+        invokeHostAction(setFatalError, (hostApi) =>
+          hostApi.sendPluginAction(action, payload),
+        );
+      }}
+      phase={snapshot.lifecycle}
+      players={players}
+    />
+  );
+}
+
+export interface JoinUrlBlockProps {
+  copyStatus: CopyStatus;
+  joinUrl: string | null;
+  onCopy(): void;
+}
+
+export function JoinUrlBlock(props: JoinUrlBlockProps) {
+  return (
+    <div className="join-block">
+      <span className="join-block-label">Players join via</span>
+      <div className="join-block-row">
+        <div className="join-url-field" title={props.joinUrl ?? "Join URL pending"}>
+          <span>{props.joinUrl ?? "Creating join URL..."}</span>
+        </div>
+        <button
+          type="button"
+          className="join-copy-button"
+          disabled={props.joinUrl === null}
+          onClick={props.onCopy}
+        >
+          {formatCopyLabel(props.copyStatus)}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface DiagnosticEventCardProps {
+  event: HostDiagnosticEvent;
+}
+
+export function DiagnosticEventCard(props: DiagnosticEventCardProps) {
+  const { event } = props;
+  const hasPayload = Object.keys(event.data).length > 0;
+
+  return (
+    <details className={`diag diag-${event.level}`}>
+      <summary className="diag-summary">
+        <div className="diag-main">
+          <span className={`diag-accent diag-accent-${event.level}`} aria-hidden="true" />
+          <div className="diag-copy-stack">
+            <strong>{event.type}</strong>
+            <p>{event.message}</p>
+          </div>
+        </div>
+        <div className="diag-meta">
+          <span className={`diag-tone diag-tone-${event.level}`}>{event.level}</span>
+          <time dateTime={new Date(event.timestamp).toISOString()}>
+            {formatTime(event.timestamp)}
+          </time>
+        </div>
+      </summary>
+      <div className="diag-details">
+        <div className="diag-detail-scroll">
+          <div className="diag-detail-block">
+            <span className="diag-detail-label">Message</span>
+            <p className="diag-detail-message">{event.message}</p>
+          </div>
+          {hasPayload ? (
+            <div className="diag-detail-block">
+              <span className="diag-detail-label">Payload</span>
+              <pre>{JSON.stringify(event.data, null, 2)}</pre>
+            </div>
+          ) : (
+            <p className="hint-copy">No structured payload for this event.</p>
+          )}
+        </div>
+      </div>
+    </details>
+  );
+}
+
+interface CentralPlayerStripProps {
+  entries: CentralLeaderboardEntry[];
+}
+
+function CentralPlayerStrip(props: CentralPlayerStripProps) {
+  if (props.entries.length === 0) {
+    return (
+      <div className="central-toplist">
+        <p className="central-toplist-empty">Waiting for players to join the session.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="central-toplist" aria-label="Player toplist">
+      {props.entries.map((entry, index) => (
+        <article
+          key={entry.playerId}
+          className={`central-player-chip central-player-${entry.status}`}
+        >
+          <span className="central-player-rank">{index + 1}</span>
+          <div className="central-player-copy">
+            <strong title={entry.name}>{entry.name}</strong>
+            <span>{entry.status}</span>
+          </div>
+          <div className="central-player-metric">
+            <span>{entry.metricLabel}</span>
+            <strong>{entry.metricValue}</strong>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
 }
 
 interface StatusCardProps {
@@ -447,8 +734,26 @@ function formatFatalError(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function formatCopyLabel(copyStatus: CopyStatus): string {
+  switch (copyStatus) {
+    case "copied": {
+      return "Copied";
+    }
+    case "failed": {
+      return "Copy failed";
+    }
+    default: {
+      return "Copy URL";
+    }
+  }
+}
+
 function formatLatency(latencyMs: number | null): string {
   return latencyMs === null ? "n/a" : `${latencyMs} ms`;
+}
+
+function formatLifecycleLabel(value: HostSnapshot["lifecycle"]): string {
+  return value.replaceAll("_", " ");
 }
 
 function formatTime(timestamp: number): string {
@@ -483,6 +788,49 @@ function getJoinUrlWarning(joinUrl: string): string | null {
   }
 }
 
+function renderCentralPlaceholder(
+  windowKind: HostWindowKind,
+  message: string,
+  tone: "error" | "hint" = "hint",
+) {
+  const className = tone === "error" ? "error-copy" : "hint-copy";
+
+  return (
+    <div
+      className={
+        windowKind === "central"
+          ? "central-placeholder"
+          : "central-preview-placeholder"
+      }
+    >
+      <p className={className}>{message}</p>
+    </div>
+  );
+}
+
+function invokeHostAction(
+  setFatalError: (value: string | null) => void,
+  action: (hostApi: HostApi) => Promise<void>,
+): void {
+  const hostApi = getHostApi();
+
+  if (hostApi === null) {
+    setFatalError(
+      "Host controls are unavailable because the preload bridge did not initialize.",
+    );
+    return;
+  }
+
+  void action(hostApi).catch((error: unknown) => {
+    setFatalError(
+      formatFatalError(
+        error,
+        "Failed to send a command to the Electron main process.",
+      ),
+    );
+  });
+}
+
 function resolveGameLabel(
   availableGames: GameManifest[],
   selectedGame: string | null,
@@ -502,6 +850,54 @@ function resolveModeratorName(snapshot: HostSnapshot): string {
   return snapshot.players.find((player) => player.playerId === snapshot.moderatorId)?.name ?? "not set";
 }
 
+function resolveWindowKind(): HostWindowKind {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("view") === "central" ? "central" : "admin";
+}
+
+function toHubSession(
+  snapshot: HostSnapshot,
+  players: GamePlayerSnapshot[],
+): NonNullable<GameCentralProps<Record<string, unknown>>["hubSession"]> {
+  return {
+    joinUrl: snapshot.joinUrl,
+    lastRelayMessageAt: snapshot.lastRelayMessageAt,
+    leaderboard: snapshot.leaderboard.map((entry) => ({ ...entry })),
+    lifecycle: snapshot.lifecycle,
+    matchStatus: { ...snapshot.matchStatus },
+    moderatorId: snapshot.moderatorId,
+    overlay: snapshot.overlay === null ? null : { ...snapshot.overlay },
+    players,
+    relayStatus: snapshot.relayStatus,
+    selectedGame: snapshot.selectedGame,
+    sessionId: snapshot.sessionId,
+    statusBadges: snapshot.statusBadges.map((badge) => ({ ...badge })),
+    updatedAt: snapshot.updatedAt,
+  };
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText !== undefined) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  const copied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+
+  if (!copied) {
+    throw new Error("Clipboard copy failed.");
+  }
+}
+
 function toGamePlayer(player: HostPlayerSnapshot): GamePlayerSnapshot {
   return {
     connected: player.connected,
@@ -512,4 +908,3 @@ function toGamePlayer(player: HostPlayerSnapshot): GamePlayerSnapshot {
     team: player.team,
   };
 }
-

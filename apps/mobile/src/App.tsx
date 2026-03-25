@@ -1,11 +1,19 @@
 import {
   PROTOCOL_VERSION,
+  safeParseGameStateEnvelope,
   safeParseHostStatePayload,
   safeParseHubMessage,
+  type HostPlayerState,
   type InputValue,
   type MobileHelloMessage,
 } from "@game-hub/protocol";
-import type { GameMobileProps } from "@game-hub/sdk";
+import type {
+  GameControlNode,
+  GameControlSchema,
+  GameMobileProps,
+  GamePlayerSnapshot,
+  GamePluginDefinition,
+} from "@game-hub/sdk";
 import {
   useEffect,
   useReducer,
@@ -20,7 +28,7 @@ import {
   extractSessionIdFromJoinTarget,
   resolveSessionIdFromSearch,
 } from "./join-session.js";
-import { loadMobilePluginComponent } from "./plugin-loader.js";
+import { loadMobilePluginDefinition } from "./plugin-loader.js";
 import {
   clearPlayerToken,
   loadPlayerToken,
@@ -51,6 +59,10 @@ export function App() {
   );
   const [joinTarget, setJoinTarget] = useState<string>("");
   const [joinTargetError, setJoinTargetError] = useState<string | null>(null);
+  const [loadedGameId, setLoadedGameId] = useState<string | null>(null);
+  const [loadedPlugin, setLoadedPlugin] = useState<
+    GamePluginDefinition<Record<string, unknown>> | null
+  >(null);
   const [pluginLoadError, setPluginLoadError] = useState<string | null>(null);
   const [MobileComponent, setMobileComponent] = useState<ComponentType<
     GameMobileProps<Record<string, unknown>>
@@ -87,28 +99,41 @@ export function App() {
     const gameId = state.activeGameId ?? state.selectedGame;
 
     if (gameId === null) {
+      setLoadedPlugin(null);
       setMobileComponent(null);
+      setLoadedGameId(null);
       setPluginLoadError(null);
       return;
     }
 
     let active = true;
-    void loadMobilePluginComponent(gameId)
-      .then((component) => {
+    setLoadedPlugin(null);
+    setMobileComponent(null);
+    setLoadedGameId(null);
+    setPluginLoadError(null);
+
+    void loadMobilePluginDefinition(gameId)
+      .then((plugin) => {
         if (!active) {
           return;
         }
 
-        setMobileComponent(() => component);
-        setPluginLoadError(component === null ? `No mobile UI registered for ${gameId}.` : null);
+        setLoadedPlugin(plugin);
+        setLoadedGameId(gameId);
+        setMobileComponent(() => plugin?.ui.mobile ?? null);
+        setPluginLoadError(plugin === null ? `No plugin registered for ${gameId}.` : null);
       })
       .catch((error: unknown) => {
         if (!active) {
           return;
         }
 
+        setLoadedPlugin(null);
         setMobileComponent(null);
-        setPluginLoadError(error instanceof Error ? error.message : "Failed to load plugin UI.");
+        setLoadedGameId(null);
+        setPluginLoadError(
+          error instanceof Error ? error.message : "Failed to load plugin UI.",
+        );
       });
 
     return () => {
@@ -374,13 +399,34 @@ export function App() {
 
   const gameId = state.activeGameId ?? state.selectedGame;
   const showLanding = state.playerId === null && state.connectionState !== "reconnecting";
+  const parsedEnvelope =
+    state.lastGameState === null
+      ? null
+      : safeParseGameStateEnvelope(state.lastGameState.state);
   const parsedHostState =
     state.lastGameState === null
       ? null
       : safeParseHostStatePayload(state.lastGameState.state);
-  const hostState = parsedHostState?.success === true ? parsedHostState.data : null;
-  const pluginState = hostState?.pluginState ?? null;
+  const hubSession =
+    parsedEnvelope?.success === true
+      ? parsedEnvelope.data.hubState
+      : parsedHostState?.success === true
+        ? parsedHostState.data
+        : null;
+  const gameState = parsedEnvelope?.success === true ? parsedEnvelope.data.gameState : null;
   const joinPageError = joinTargetError ?? searchResolution.error;
+  const gamePlayers = state.players.map((player) => toGamePlayer(player));
+  const controlsSchema =
+    loadedPlugin?.controls?.({
+      gameState,
+      hubSession,
+      phase: state.phase,
+      playerId: state.playerId,
+      players: gamePlayers,
+      role: state.role,
+    }) ?? null;
+  const matchStatus = hubSession?.matchStatus ?? null;
+  const overlay = hubSession?.overlay ?? null;
 
   return (
     <main className="app-shell">
@@ -463,7 +509,7 @@ export function App() {
               <div>
                 <h2>Lobby</h2>
                 <p className="meta-copy">
-                  You are <strong>{state.role ?? "player"}</strong> � Relay <strong>{state.relayStatus ?? "pending"}</strong>
+                  You are <strong>{state.role ?? "player"}</strong> Ã¯Â¿Â½ Relay <strong>{state.relayStatus ?? "pending"}</strong>
                 </p>
               </div>
               <div className="identity-block">
@@ -502,21 +548,49 @@ export function App() {
 
           {gameId !== null ? (
             <section className="panel plugin-panel">
+              {overlay === null ? null : (
+                <section className="moderator-callout">
+                  <strong>{overlay.title}</strong>
+                  {overlay.message === null ? null : <p>{overlay.message}</p>}
+                </section>
+              )}
+
+              {matchStatus !== null &&
+              (matchStatus.title !== null || matchStatus.message !== null) ? (
+                <section className="panel">
+                  <h2>{matchStatus.title ?? "Match status"}</h2>
+                  {matchStatus.message === null ? null : <p>{matchStatus.message}</p>}
+                </section>
+              ) : null}
+
+              {controlsSchema === null ? null : (
+                <HubControlsPanel schema={controlsSchema} sendInput={sendInput} />
+              )}
+
               {pluginLoadError !== null ? (
                 <p className="error-copy">{pluginLoadError}</p>
-              ) : MobileComponent === null ? (
-                <p className="hint-copy">Loading plugin UI...</p>
+              ) : MobileComponent === null || loadedGameId !== gameId ? (
+                loadedPlugin !== null && loadedPlugin.ui.mobile === undefined ? null : (
+                  <p className="hint-copy">Loading plugin UI...</p>
+                )
               ) : (
                 <MobileComponent
-                  hostState={hostState}
+                  gameState={gameState}
+                  hubSession={hubSession}
                   phase={state.phase}
                   playerId={state.playerId}
-                  players={state.players}
-                  pluginState={pluginState}
+                  players={gamePlayers}
                   role={state.role}
                   sendInput={sendInput}
                 />
               )}
+
+              {controlsSchema === null &&
+              MobileComponent === null &&
+              loadedGameId === gameId &&
+              pluginLoadError === null ? (
+                <p className="hint-copy">This game does not expose a mobile scene yet.</p>
+              ) : null}
             </section>
           ) : null}
         </>
@@ -551,6 +625,135 @@ export function App() {
   }
 }
 
+interface HubControlsPanelProps {
+  schema: GameControlSchema;
+  sendInput(action: string, payload?: InputValue): void;
+}
+
+function HubControlsPanel(props: HubControlsPanelProps) {
+  return (
+    <section className="panel">
+      <h2>Controls</h2>
+      <div className="plugin-stack">
+        {props.schema.controls.map((control, index) => (
+          <ControlNodeView
+            key={control.kind + '-' + String(index)}
+            control={control}
+            sendInput={props.sendInput}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+interface ControlNodeViewProps {
+  control: GameControlNode;
+  sendInput(action: string, payload?: InputValue): void;
+}
+
+function ControlNodeView(props: ControlNodeViewProps) {
+  const { control, sendInput } = props;
+
+  switch (control.kind) {
+    case "button": {
+      return (
+        <button
+          type="button"
+          disabled={control.disabled === true}
+          onClick={() => sendInput(control.action, control.payload)}
+        >
+          {control.label}
+        </button>
+      );
+    }
+    case "dpad": {
+      const labels = {
+        down: control.labels?.down ?? "Down",
+        left: control.labels?.left ?? "Left",
+        right: control.labels?.right ?? "Right",
+        up: control.labels?.up ?? "Up",
+      };
+
+      return (
+        <div className="plugin-stack">
+          <div className="actions-grid">
+            <button
+              type="button"
+              disabled={control.disabled === true}
+              onClick={() => sendInput(control.action, { dir: "up" })}
+            >
+              {labels.up}
+            </button>
+          </div>
+          <div className="actions-grid">
+            <button
+              type="button"
+              disabled={control.disabled === true}
+              onClick={() => sendInput(control.action, { dir: "left" })}
+            >
+              {labels.left}
+            </button>
+            <button
+              type="button"
+              disabled={control.disabled === true}
+              onClick={() => sendInput(control.action, { dir: "down" })}
+            >
+              {labels.down}
+            </button>
+            <button
+              type="button"
+              disabled={control.disabled === true}
+              onClick={() => sendInput(control.action, { dir: "right" })}
+            >
+              {labels.right}
+            </button>
+          </div>
+        </div>
+      );
+    }
+    case "group": {
+      return (
+        <section className="plugin-stack">
+          {control.title === undefined ? null : <h3>{control.title}</h3>}
+          {control.controls.map((child, index) => (
+            <ControlNodeView
+              key={child.kind + '-' + String(index)}
+              control={child}
+              sendInput={sendInput}
+            />
+          ))}
+        </section>
+      );
+    }
+    case "notice": {
+      return <p className="plugin-copy">{control.text}</p>;
+    }
+    case "options": {
+      return (
+        <section className="plugin-stack">
+          {control.label === undefined ? null : <h3>{control.label}</h3>}
+          <div className={control.layout === "list" ? "plugin-stack" : "actions-grid"}>
+            {control.options.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                disabled={control.disabled === true || option.disabled === true}
+                onClick={() => sendInput(control.action, option.payload ?? option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </section>
+      );
+    }
+    default: {
+      return null;
+    }
+  }
+}
+
 interface StatusPillProps {
   label: string;
   value: string;
@@ -564,3 +767,15 @@ function StatusPill(props: StatusPillProps) {
     </div>
   );
 }
+
+function toGamePlayer(player: HostPlayerState): GamePlayerSnapshot {
+  return {
+    connected: player.connected,
+    lastSeen: player.lastSeen,
+    name: player.name,
+    playerId: player.playerId,
+    role: player.role,
+    team: player.team,
+  };
+}
+

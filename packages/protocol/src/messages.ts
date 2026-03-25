@@ -2,6 +2,34 @@ import { z } from "zod";
 
 export const PROTOCOL_VERSION = 1;
 
+const MAX_MESSAGE_ID_LENGTH = 64;
+const MAX_SESSION_ID_LENGTH = 64;
+const MAX_PLAYER_ID_LENGTH = 64;
+const MAX_PLAYER_TOKEN_LENGTH = 128;
+const MAX_PLUGIN_ID_LENGTH = 64;
+const MAX_PLAYER_NAME_LENGTH = 48;
+const MAX_ACTION_LENGTH = 64;
+const MAX_REASON_LENGTH = 160;
+const MAX_ERROR_CODE_LENGTH = 64;
+const MAX_ERROR_MESSAGE_LENGTH = 240;
+const MAX_URL_LENGTH = 2048;
+const MAX_STATUS_LENGTH = 64;
+
+function normalizeHumanReadableString(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function createNormalizedStringSchema(maxLength: number) {
+  return z
+    .string()
+    .transform((value) => normalizeHumanReadableString(value))
+    .pipe(z.string().min(1).max(maxLength));
+}
+
+function createBoundedStringSchema(maxLength: number) {
+  return z.string().min(1).max(maxLength);
+}
+
 export const PeerRoleSchema = z.enum(["host", "client", "relay"]);
 export const ClientKindSchema = z.enum(["host", "mobile"]);
 export const SessionPhaseSchema = z.enum([
@@ -21,13 +49,27 @@ export const RelayConnectionStatusSchema = z.enum([
 ]);
 export const PlayerRoleSchema = z.enum(["player", "moderator"]);
 export const PlayerTeamSchema = z.enum(["A", "B"]);
+export const GameMatchStatusStateSchema = z.enum([
+  "idle",
+  "countdown",
+  "running",
+  "paused",
+  "round_finished",
+  "match_finished",
+]);
+export const GameUiBadgeToneSchema = z.enum(["info", "neutral", "success", "warn"]);
+export const GameUiOverlayToneSchema = z.enum(["error", "info", "success", "warn"]);
 
-export const MessageIdSchema = z.string().min(1);
-export const SessionIdSchema = z.string().min(1);
+export const MessageIdSchema = createBoundedStringSchema(MAX_MESSAGE_ID_LENGTH);
+export const SessionIdSchema = createBoundedStringSchema(MAX_SESSION_ID_LENGTH);
 export const TimestampSchema = z.number().int().nonnegative();
-export const PlayerIdSchema = z.string().min(1);
-export const PlayerTokenSchema = z.string().min(1);
-export const PluginIdSchema = z.string().min(1);
+export const PlayerIdSchema = createBoundedStringSchema(MAX_PLAYER_ID_LENGTH);
+export const PlayerTokenSchema = createBoundedStringSchema(MAX_PLAYER_TOKEN_LENGTH);
+export const PluginIdSchema = createBoundedStringSchema(MAX_PLUGIN_ID_LENGTH);
+export const PlayerDisplayNameSchema = createNormalizedStringSchema(
+  MAX_PLAYER_NAME_LENGTH,
+);
+export const StatusTextSchema = createNormalizedStringSchema(MAX_STATUS_LENGTH);
 
 export type InputValue =
   | string
@@ -48,26 +90,71 @@ export const InputValueSchema: z.ZodType<InputValue> = z.lazy(() =>
 
 export const PlayerSchema = z.object({
   playerId: PlayerIdSchema,
-  playerName: z.string().min(1),
+  playerName: PlayerDisplayNameSchema,
 });
 
 export const HostPlayerStateSchema = z.object({
   connected: z.boolean(),
   lastSeen: TimestampSchema,
-  name: z.string().min(1),
+  name: PlayerDisplayNameSchema,
   playerId: PlayerIdSchema,
   role: PlayerRoleSchema,
   team: PlayerTeamSchema,
 });
 
-export const HostStatePayloadSchema = z.object({
+export const SessionLeaderboardEntrySchema = z.object({
+  connected: z.boolean(),
+  name: PlayerDisplayNameSchema,
+  placement: z.number().int().positive().nullable(),
+  playerId: PlayerIdSchema,
+  role: PlayerRoleSchema,
+  score: z.number(),
+  status: StatusTextSchema.nullable(),
+  team: PlayerTeamSchema,
+  teamScore: z.number(),
+  wins: z.number().int().nonnegative(),
+});
+
+export const GameMatchStatusSchema = z.object({
+  message: z.string().min(1).nullable(),
+  state: GameMatchStatusStateSchema,
+  title: z.string().min(1).nullable(),
+});
+
+export const GameUiBadgeSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  tone: GameUiBadgeToneSchema.default("neutral"),
+  value: z.string().min(1),
+});
+
+export const GameUiOverlaySchema = z.object({
+  message: z.string().min(1).nullable(),
+  title: z.string().min(1),
+  tone: GameUiOverlayToneSchema.default("info"),
+});
+
+export const HubStatePayloadSchema = z.object({
+  joinUrl: createBoundedStringSchema(MAX_URL_LENGTH).nullable(),
+  lastRelayMessageAt: TimestampSchema.nullable(),
+  leaderboard: z.array(SessionLeaderboardEntrySchema),
   lifecycle: SessionPhaseSchema,
+  matchStatus: GameMatchStatusSchema,
   moderatorId: PlayerIdSchema.nullable(),
+  overlay: GameUiOverlaySchema.nullable(),
   players: z.array(HostPlayerStateSchema),
-  pluginState: z.record(z.unknown()).nullable().optional(),
   relayStatus: RelayConnectionStatusSchema,
   selectedGame: PluginIdSchema.nullable(),
   sessionId: SessionIdSchema,
+  statusBadges: z.array(GameUiBadgeSchema),
+  updatedAt: TimestampSchema,
+});
+
+export const HostStatePayloadSchema = HubStatePayloadSchema;
+
+export const GameStateEnvelopePayloadSchema = z.object({
+  gameState: z.record(z.unknown()).nullable(),
+  hubState: HubStatePayloadSchema,
 });
 
 const BaseMessageSchema = z.object({
@@ -80,17 +167,17 @@ export const HelloMessageSchema = BaseMessageSchema.extend({
   role: PeerRoleSchema.optional(),
   clientKind: ClientKindSchema.optional(),
   sessionId: SessionIdSchema,
-  token: z.string().min(1).optional(),
-  name: z.string().min(1).optional(),
+  token: createBoundedStringSchema(MAX_PLAYER_TOKEN_LENGTH).optional(),
+  name: PlayerDisplayNameSchema.optional(),
   playerId: PlayerIdSchema.optional(),
-  playerName: z.string().min(1).optional(),
+  playerName: PlayerDisplayNameSchema.optional(),
   pluginId: PluginIdSchema.optional(),
   protocolVersion: z.literal(PROTOCOL_VERSION).default(PROTOCOL_VERSION),
 });
 
 export const HostHelloMessageSchema = HelloMessageSchema.extend({
   clientKind: z.literal("host"),
-  token: z.string().min(1),
+  token: createBoundedStringSchema(MAX_PLAYER_TOKEN_LENGTH),
 });
 
 export const MobileHelloMessageSchema = HelloMessageSchema.extend({
@@ -113,7 +200,7 @@ export const AckMessageSchema = BaseMessageSchema.extend({
   type: z.literal("ack"),
   refId: MessageIdSchema,
   accepted: z.boolean(),
-  detail: z.string().min(1).optional(),
+  detail: createNormalizedStringSchema(MAX_REASON_LENGTH).optional(),
 });
 
 export const HeartbeatMessageSchema = BaseMessageSchema.extend({
@@ -123,7 +210,7 @@ export const HeartbeatMessageSchema = BaseMessageSchema.extend({
 export const PlayerJoinedMessageSchema = BaseMessageSchema.extend({
   type: z.literal("player_joined"),
   playerId: PlayerIdSchema,
-  playerName: z.string().min(1),
+  playerName: PlayerDisplayNameSchema,
   playerToken: PlayerTokenSchema.optional(),
   reconnect: z.boolean().optional(),
 });
@@ -131,14 +218,14 @@ export const PlayerJoinedMessageSchema = BaseMessageSchema.extend({
 export const PlayerLeftMessageSchema = BaseMessageSchema.extend({
   type: z.literal("player_left"),
   playerId: PlayerIdSchema,
-  reason: z.string().min(1).optional(),
+  reason: createNormalizedStringSchema(MAX_REASON_LENGTH).optional(),
 });
 
 export const InputMessageSchema = BaseMessageSchema.extend({
   type: z.literal("input"),
   playerId: PlayerIdSchema,
   sequence: z.number().int().nonnegative(),
-  action: z.string().min(1),
+  action: createBoundedStringSchema(MAX_ACTION_LENGTH),
   value: InputValueSchema.optional(),
 });
 
@@ -150,19 +237,19 @@ export const StartGameMessageSchema = BaseMessageSchema.extend({
 
 export const StopGameMessageSchema = BaseMessageSchema.extend({
   type: z.literal("stop_game"),
-  reason: z.string().min(1).optional(),
+  reason: createNormalizedStringSchema(MAX_REASON_LENGTH).optional(),
 });
 
 export const PluginLoadedMessageSchema = BaseMessageSchema.extend({
   type: z.literal("plugin_loaded"),
   pluginId: PluginIdSchema,
-  version: z.string().min(1),
+  version: createBoundedStringSchema(MAX_REASON_LENGTH),
 });
 
 export const SessionTerminatedMessageSchema = BaseMessageSchema.extend({
   type: z.literal("session_terminated"),
   sessionId: SessionIdSchema,
-  reason: z.string().min(1),
+  reason: createNormalizedStringSchema(MAX_REASON_LENGTH),
 });
 
 export const GameStateMessageSchema = BaseMessageSchema.extend({
@@ -170,13 +257,13 @@ export const GameStateMessageSchema = BaseMessageSchema.extend({
   pluginId: PluginIdSchema,
   tick: z.number().int().nonnegative(),
   players: z.array(PlayerSchema),
-  state: z.record(z.unknown()),
+  state: GameStateEnvelopePayloadSchema,
 });
 
 export const ErrorMessageSchema = BaseMessageSchema.extend({
   type: z.literal("error"),
-  code: z.string().min(1),
-  message: z.string().min(1),
+  code: createBoundedStringSchema(MAX_ERROR_CODE_LENGTH),
+  message: createNormalizedStringSchema(MAX_ERROR_MESSAGE_LENGTH),
 });
 
 export const messageSchemas = {
@@ -238,20 +325,40 @@ export type RelayConnectionStatus = z.infer<
 export type PlayerRole = z.infer<typeof PlayerRoleSchema>;
 export type PlayerTeam = z.infer<typeof PlayerTeamSchema>;
 export type HostPlayerState = z.infer<typeof HostPlayerStateSchema>;
+export type HubStatePayload = z.infer<typeof HubStatePayloadSchema>;
 export type HostStatePayload = z.infer<typeof HostStatePayloadSchema>;
+export type SessionLeaderboardEntry = z.infer<typeof SessionLeaderboardEntrySchema>;
+export type GameMatchStatus = z.infer<typeof GameMatchStatusSchema>;
+export type GameUiBadge = z.infer<typeof GameUiBadgeSchema>;
+export type GameUiOverlay = z.infer<typeof GameUiOverlaySchema>;
+export type GameStateEnvelopePayload = z.infer<typeof GameStateEnvelopePayloadSchema>;
 
 export function parseHubMessage(input: unknown): HubMessage {
   return HubMessageSchema.parse(input);
+}
+
+export function safeParseGameStateEnvelope(input: unknown) {
+  return GameStateEnvelopePayloadSchema.safeParse(input);
 }
 
 export function safeParseHubMessage(input: unknown) {
   return HubMessageSchema.safeParse(input);
 }
 
-export function isHubMessage(input: unknown): input is HubMessage {
-  return safeParseHubMessage(input).success;
+export function safeParseHubStatePayload(input: unknown) {
+  return HubStatePayloadSchema.safeParse(input);
 }
 
 export function safeParseHostStatePayload(input: unknown) {
-  return HostStatePayloadSchema.safeParse(input);
+  const envelopeResult = safeParseGameStateEnvelope(input);
+
+  if (envelopeResult.success) {
+    return safeParseHubStatePayload(envelopeResult.data.hubState);
+  }
+
+  return safeParseHubStatePayload(input);
+}
+
+export function isHubMessage(input: unknown): input is HubMessage {
+  return safeParseHubMessage(input).success;
 }

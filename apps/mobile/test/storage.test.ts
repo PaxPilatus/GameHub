@@ -1,4 +1,4 @@
-﻿import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   buildPlayerTokenStorageKey,
@@ -28,12 +28,28 @@ describe("mobile token storage", () => {
   it("stores and reloads a player token per session", () => {
     const storage = new MemoryStorage();
 
-    savePlayerToken(storage, "session-1", "token-1");
+    savePlayerToken(storage, "session-1", "token-1", 1_000, 10_000);
 
-    expect(loadPlayerToken(storage, "session-1")).toBe("token-1");
+    expect(loadPlayerToken(storage, "session-1", 5_000)).toBe("token-1");
     expect(buildPlayerTokenStorageKey("session-1")).toBe(
       "game-hub-player-token:session-1",
     );
+  });
+
+  it("expires old reconnect records", () => {
+    const storage = new MemoryStorage();
+
+    savePlayerToken(storage, "session-1", "token-1", 1_000, 2_000);
+
+    expect(loadPlayerToken(storage, "session-1", 3_001)).toBeNull();
+    expect(storage.getItem(buildPlayerTokenStorageKey("session-1"))).toBeNull();
+  });
+
+  it("migrates legacy plain-token storage once and bounds it by age", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(buildPlayerTokenStorageKey("session-legacy"), "legacy-token");
+
+    expect(loadPlayerToken(storage, "session-legacy", 10_000)).toBe("legacy-token");
   });
 
   it("clears an existing token", () => {

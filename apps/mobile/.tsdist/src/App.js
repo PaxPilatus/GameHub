@@ -1,8 +1,8 @@
 import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
-import { PROTOCOL_VERSION, safeParseHostStatePayload, safeParseHubMessage, } from "@game-hub/protocol";
+import { PROTOCOL_VERSION, safeParseGameStateEnvelope, safeParseHostStatePayload, safeParseHubMessage, } from "@game-hub/protocol";
 import { useEffect, useReducer, useRef, useState, } from "react";
 import { buildJoinSearch, extractSessionIdFromJoinTarget, resolveSessionIdFromSearch, } from "./join-session.js";
-import { loadMobilePluginComponent } from "./plugin-loader.js";
+import { loadMobilePluginDefinition } from "./plugin-loader.js";
 import { clearPlayerToken, loadPlayerToken, savePlayerToken, } from "./storage.js";
 import { createInitialMobileClientState, mobileClientReducer, } from "./state.js";
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
@@ -21,6 +21,8 @@ export function App() {
     }));
     const [joinTarget, setJoinTarget] = useState("");
     const [joinTargetError, setJoinTargetError] = useState(null);
+    const [loadedGameId, setLoadedGameId] = useState(null);
+    const [loadedPlugin, setLoadedPlugin] = useState(null);
     const [pluginLoadError, setPluginLoadError] = useState(null);
     const [MobileComponent, setMobileComponent] = useState(null);
     const socketRef = useRef(null);
@@ -50,24 +52,34 @@ export function App() {
     useEffect(() => {
         const gameId = state.activeGameId ?? state.selectedGame;
         if (gameId === null) {
+            setLoadedPlugin(null);
             setMobileComponent(null);
+            setLoadedGameId(null);
             setPluginLoadError(null);
             return;
         }
         let active = true;
-        void loadMobilePluginComponent(gameId)
-            .then((component) => {
+        setLoadedPlugin(null);
+        setMobileComponent(null);
+        setLoadedGameId(null);
+        setPluginLoadError(null);
+        void loadMobilePluginDefinition(gameId)
+            .then((plugin) => {
             if (!active) {
                 return;
             }
-            setMobileComponent(() => component);
-            setPluginLoadError(component === null ? `No mobile UI registered for ${gameId}.` : null);
+            setLoadedPlugin(plugin);
+            setLoadedGameId(gameId);
+            setMobileComponent(() => plugin?.ui.mobile ?? null);
+            setPluginLoadError(plugin === null ? `No plugin registered for ${gameId}.` : null);
         })
             .catch((error) => {
             if (!active) {
                 return;
             }
+            setLoadedPlugin(null);
             setMobileComponent(null);
+            setLoadedGameId(null);
             setPluginLoadError(error instanceof Error ? error.message : "Failed to load plugin UI.");
         });
         return () => {
@@ -284,12 +296,30 @@ export function App() {
     }
     const gameId = state.activeGameId ?? state.selectedGame;
     const showLanding = state.playerId === null && state.connectionState !== "reconnecting";
+    const parsedEnvelope = state.lastGameState === null
+        ? null
+        : safeParseGameStateEnvelope(state.lastGameState.state);
     const parsedHostState = state.lastGameState === null
         ? null
         : safeParseHostStatePayload(state.lastGameState.state);
-    const hostState = parsedHostState?.success === true ? parsedHostState.data : null;
-    const pluginState = hostState?.pluginState ?? null;
+    const hubSession = parsedEnvelope?.success === true
+        ? parsedEnvelope.data.hubState
+        : parsedHostState?.success === true
+            ? parsedHostState.data
+            : null;
+    const gameState = parsedEnvelope?.success === true ? parsedEnvelope.data.gameState : null;
     const joinPageError = joinTargetError ?? searchResolution.error;
+    const gamePlayers = state.players.map((player) => toGamePlayer(player));
+    const controlsSchema = loadedPlugin?.controls?.({
+        gameState,
+        hubSession,
+        phase: state.phase,
+        playerId: state.playerId,
+        players: gamePlayers,
+        role: state.role,
+    }) ?? null;
+    const matchStatus = hubSession?.matchStatus ?? null;
+    const overlay = hubSession?.overlay ?? null;
     return (_jsxs("main", { className: "app-shell", children: [_jsxs("section", { className: "hero-card", children: [_jsx("p", { className: "eyebrow", children: "Game Hub Mobile" }), _jsx("h1", { children: sessionId === ""
                             ? "Join a session from your phone."
                             : "Join a local session from your phone." }), _jsx("p", { className: "hero-copy", children: sessionId === ""
@@ -303,13 +333,59 @@ export function App() {
                                     dispatch({ type: "name_changed", name: event.target.value });
                                 } }), _jsx("button", { type: "submit", disabled: state.connectionState === "connecting", children: state.playerToken === null ? "Join Session" : "Reconnect" })] }), _jsx("p", { className: "hint-copy", children: state.playerToken === null
                             ? "A new playerToken is issued after hello_ack and stored locally for reconnects."
-                            : "Stored reconnect token found. The client can reclaim the same player slot after reload." })] })) : null, state.playerId !== null ? (_jsxs(_Fragment, { children: [_jsxs("section", { className: "panel", children: [_jsxs("div", { className: "panel-header", children: [_jsxs("div", { children: [_jsx("h2", { children: "Lobby" }), _jsxs("p", { className: "meta-copy", children: ["You are ", _jsx("strong", { children: state.role ?? "player" }), " \uFFFD Relay ", _jsx("strong", { children: state.relayStatus ?? "pending" })] })] }), _jsxs("div", { className: "identity-block", children: [_jsx("span", { children: "Player" }), _jsx("strong", { children: state.playerId })] })] }), state.role === "moderator" ? (_jsxs("div", { className: "moderator-callout", children: [_jsx("strong", { children: "Moderator view" }), _jsx("p", { children: "The host still owns game selection and start/stop. This client only exposes the mobile input surface." })] })) : null, _jsx("div", { className: "player-list", children: state.players.length === 0 ? (_jsx("p", { className: "empty-copy", children: "Waiting for the latest host snapshot." })) : (state.players.map((player) => (_jsxs("article", { className: "player-card", children: [_jsxs("div", { children: [_jsx("h3", { children: player.name }), _jsx("p", { children: player.playerId })] }), _jsxs("div", { className: "player-meta", children: [_jsx("span", { children: player.role }), _jsxs("span", { children: ["Team ", player.team] }), _jsx("span", { children: player.connected ? "online" : "offline" })] })] }, player.playerId)))) })] }), gameId !== null ? (_jsx("section", { className: "panel plugin-panel", children: pluginLoadError !== null ? (_jsx("p", { className: "error-copy", children: pluginLoadError })) : MobileComponent === null ? (_jsx("p", { className: "hint-copy", children: "Loading plugin UI..." })) : (_jsx(MobileComponent, { hostState: hostState, phase: state.phase, playerId: state.playerId, players: state.players, pluginState: pluginState, role: state.role, sendInput: sendInput })) })) : null] })) : null, joinPageError !== null ? (_jsxs("section", { className: "panel error-panel", children: [_jsx("h2", { children: "Join Error" }), _jsx("p", { children: joinPageError })] })) : null, state.lastError !== null ? (_jsxs("section", { className: "panel error-panel", children: [_jsx("h2", { children: "Relay Error" }), _jsx("p", { children: state.lastError })] })) : null, state.sessionTerminatedReason !== null ? (_jsxs("section", { className: "panel error-panel", children: [_jsx("h2", { children: "Session Terminated" }), _jsx("p", { children: state.sessionTerminatedReason })] })) : null] }));
+                            : "Stored reconnect token found. The client can reclaim the same player slot after reload." })] })) : null, state.playerId !== null ? (_jsxs(_Fragment, { children: [_jsxs("section", { className: "panel", children: [_jsxs("div", { className: "panel-header", children: [_jsxs("div", { children: [_jsx("h2", { children: "Lobby" }), _jsxs("p", { className: "meta-copy", children: ["You are ", _jsx("strong", { children: state.role ?? "player" }), " \u00C3\u00AF\u00C2\u00BF\u00C2\u00BD Relay ", _jsx("strong", { children: state.relayStatus ?? "pending" })] })] }), _jsxs("div", { className: "identity-block", children: [_jsx("span", { children: "Player" }), _jsx("strong", { children: state.playerId })] })] }), state.role === "moderator" ? (_jsxs("div", { className: "moderator-callout", children: [_jsx("strong", { children: "Moderator view" }), _jsx("p", { children: "The host still owns game selection and start/stop. This client only exposes the mobile input surface." })] })) : null, _jsx("div", { className: "player-list", children: state.players.length === 0 ? (_jsx("p", { className: "empty-copy", children: "Waiting for the latest host snapshot." })) : (state.players.map((player) => (_jsxs("article", { className: "player-card", children: [_jsxs("div", { children: [_jsx("h3", { children: player.name }), _jsx("p", { children: player.playerId })] }), _jsxs("div", { className: "player-meta", children: [_jsx("span", { children: player.role }), _jsxs("span", { children: ["Team ", player.team] }), _jsx("span", { children: player.connected ? "online" : "offline" })] })] }, player.playerId)))) })] }), gameId !== null ? (_jsxs("section", { className: "panel plugin-panel", children: [overlay === null ? null : (_jsxs("section", { className: "moderator-callout", children: [_jsx("strong", { children: overlay.title }), overlay.message === null ? null : _jsx("p", { children: overlay.message })] })), matchStatus !== null &&
+                                (matchStatus.title !== null || matchStatus.message !== null) ? (_jsxs("section", { className: "panel", children: [_jsx("h2", { children: matchStatus.title ?? "Match status" }), matchStatus.message === null ? null : _jsx("p", { children: matchStatus.message })] })) : null, controlsSchema === null ? null : (_jsx(HubControlsPanel, { schema: controlsSchema, sendInput: sendInput })), pluginLoadError !== null ? (_jsx("p", { className: "error-copy", children: pluginLoadError })) : MobileComponent === null || loadedGameId !== gameId ? (loadedPlugin !== null && loadedPlugin.ui.mobile === undefined ? null : (_jsx("p", { className: "hint-copy", children: "Loading plugin UI..." }))) : (_jsx(MobileComponent, { gameState: gameState, hubSession: hubSession, phase: state.phase, playerId: state.playerId, players: gamePlayers, role: state.role, sendInput: sendInput })), controlsSchema === null &&
+                                MobileComponent === null &&
+                                loadedGameId === gameId &&
+                                pluginLoadError === null ? (_jsx("p", { className: "hint-copy", children: "This game does not expose a mobile scene yet." })) : null] })) : null] })) : null, joinPageError !== null ? (_jsxs("section", { className: "panel error-panel", children: [_jsx("h2", { children: "Join Error" }), _jsx("p", { children: joinPageError })] })) : null, state.lastError !== null ? (_jsxs("section", { className: "panel error-panel", children: [_jsx("h2", { children: "Relay Error" }), _jsx("p", { children: state.lastError })] })) : null, state.sessionTerminatedReason !== null ? (_jsxs("section", { className: "panel error-panel", children: [_jsx("h2", { children: "Session Terminated" }), _jsx("p", { children: state.sessionTerminatedReason })] })) : null] }));
     function buildMobileWebSocketUrl() {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         return `${protocol}//${window.location.host}/ws/mobile`;
     }
 }
+function HubControlsPanel(props) {
+    return (_jsxs("section", { className: "panel", children: [_jsx("h2", { children: "Controls" }), _jsx("div", { className: "plugin-stack", children: props.schema.controls.map((control, index) => (_jsx(ControlNodeView, { control: control, sendInput: props.sendInput }, control.kind + '-' + String(index)))) })] }));
+}
+function ControlNodeView(props) {
+    const { control, sendInput } = props;
+    switch (control.kind) {
+        case "button": {
+            return (_jsx("button", { type: "button", disabled: control.disabled === true, onClick: () => sendInput(control.action, control.payload), children: control.label }));
+        }
+        case "dpad": {
+            const labels = {
+                down: control.labels?.down ?? "Down",
+                left: control.labels?.left ?? "Left",
+                right: control.labels?.right ?? "Right",
+                up: control.labels?.up ?? "Up",
+            };
+            return (_jsxs("div", { className: "plugin-stack", children: [_jsx("div", { className: "actions-grid", children: _jsx("button", { type: "button", disabled: control.disabled === true, onClick: () => sendInput(control.action, { dir: "up" }), children: labels.up }) }), _jsxs("div", { className: "actions-grid", children: [_jsx("button", { type: "button", disabled: control.disabled === true, onClick: () => sendInput(control.action, { dir: "left" }), children: labels.left }), _jsx("button", { type: "button", disabled: control.disabled === true, onClick: () => sendInput(control.action, { dir: "down" }), children: labels.down }), _jsx("button", { type: "button", disabled: control.disabled === true, onClick: () => sendInput(control.action, { dir: "right" }), children: labels.right })] })] }));
+        }
+        case "group": {
+            return (_jsxs("section", { className: "plugin-stack", children: [control.title === undefined ? null : _jsx("h3", { children: control.title }), control.controls.map((child, index) => (_jsx(ControlNodeView, { control: child, sendInput: sendInput }, child.kind + '-' + String(index))))] }));
+        }
+        case "notice": {
+            return _jsx("p", { className: "plugin-copy", children: control.text });
+        }
+        case "options": {
+            return (_jsxs("section", { className: "plugin-stack", children: [control.label === undefined ? null : _jsx("h3", { children: control.label }), _jsx("div", { className: control.layout === "list" ? "plugin-stack" : "actions-grid", children: control.options.map((option) => (_jsx("button", { type: "button", disabled: control.disabled === true || option.disabled === true, onClick: () => sendInput(control.action, option.payload ?? option.id), children: option.label }, option.id))) })] }));
+        }
+        default: {
+            return null;
+        }
+    }
+}
 function StatusPill(props) {
     return (_jsxs("div", { className: "status-pill", children: [_jsx("span", { children: props.label }), _jsx("strong", { children: props.value })] }));
+}
+function toGamePlayer(player) {
+    return {
+        connected: player.connected,
+        lastSeen: player.lastSeen,
+        name: player.name,
+        playerId: player.playerId,
+        role: player.role,
+        team: player.team,
+    };
 }
 //# sourceMappingURL=App.js.map

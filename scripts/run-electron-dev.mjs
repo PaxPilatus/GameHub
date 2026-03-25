@@ -68,12 +68,15 @@ function startElectron() {
   }
 
   waitingForArtifacts = false;
+  const electronEnv = {
+    ...process.env,
+    RELAY_BASE_URL: relayBaseUrl,
+  };
+  delete electronEnv.ELECTRON_RUN_AS_NODE;
+
   child = spawn(electronBinary, [hostDir], {
     cwd: hostDir,
-    env: {
-      ...process.env,
-      RELAY_BASE_URL: relayBaseUrl,
-    },
+    env: electronEnv,
     stdio: "inherit",
   });
 
@@ -129,4 +132,5 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 }
 
 scheduleRestart(600);
+
 

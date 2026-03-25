@@ -235,12 +235,15 @@ async function main() {
 
   console.log(`[start:built] relay ready on ${config.relayBaseUrl}`);
 
+  const electronEnv = {
+    ...process.env,
+    RELAY_BASE_URL: config.relayBaseUrl,
+  };
+  delete electronEnv.ELECTRON_RUN_AS_NODE;
+
   hostChild = spawn(electronBinary, [hostDir], {
     cwd: hostDir,
-    env: {
-      ...process.env,
-      RELAY_BASE_URL: config.relayBaseUrl,
-    },
+    env: electronEnv,
     stdio: ["inherit", "pipe", "pipe"],
   });
   forwardOutput(hostChild.stdout, process.stdout);
@@ -270,4 +273,5 @@ if (
     process.exit(1);
   });
 }
+
 

@@ -1,4 +1,4 @@
-﻿import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type {
   GameStateMessage,
@@ -60,21 +60,37 @@ describe("mobile client reducer", () => {
       pluginId: "trivia",
       sentAt: 2,
       state: {
-        lifecycle: "game_running",
-        moderatorId: "player-1",
-        players: [
-          {
-            connected: true,
-            lastSeen: 2,
-            name: "Alice",
-            playerId: "player-1",
-            role: "moderator",
-            team: "A",
+        gameState: {
+          questionNumber: 1,
+        },
+        hubState: {
+          joinUrl: "https://relay.example/?sessionId=session-1",
+          lastRelayMessageAt: 2,
+          leaderboard: [],
+          lifecycle: "game_running",
+          matchStatus: {
+            message: null,
+            state: "running",
+            title: null,
           },
-        ],
-        relayStatus: "connected",
-        selectedGame: "trivia",
-        sessionId: "session-1",
+          moderatorId: "player-1",
+          overlay: null,
+          players: [
+            {
+              connected: true,
+              lastSeen: 2,
+              name: "Alice",
+              playerId: "player-1",
+              role: "moderator",
+              team: "A",
+            },
+          ],
+          relayStatus: "connected",
+          selectedGame: "trivia",
+          sessionId: "session-1",
+          statusBadges: [],
+          updatedAt: 2,
+        },
       },
       tick: 7,
       type: "game_state",

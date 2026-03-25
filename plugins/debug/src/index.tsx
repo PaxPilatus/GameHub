@@ -1,4 +1,8 @@
-﻿import type { GameCentralProps, GameMobileProps } from "@game-hub/sdk";
+import type {
+  GameCentralProps,
+  GameControlsResolverContext,
+  GameMobileProps,
+} from "@game-hub/sdk";
 import { createGamePlugin } from "@game-hub/sdk";
 
 export interface DebugState extends Record<string, unknown> {
@@ -21,12 +25,30 @@ function readIncrementPayload(value: unknown): number | undefined {
 }
 
 function createSummary(state: DebugState): string {
-  return `${state.lastEvent} · counter ${state.counter} · ticks ${state.ticks}`;
+  return `${state.lastEvent} / counter ${state.counter} / ticks ${state.ticks}`;
+}
+
+function buildDebugControls(_context: GameControlsResolverContext<DebugState>) {
+  return {
+    controls: [
+      {
+        kind: "notice" as const,
+        text: "Use the shared hub button to increment the counter.",
+      },
+      {
+        action: "increment",
+        kind: "button" as const,
+        label: "Increment",
+        payload: 1,
+      },
+    ],
+  };
 }
 
 function DebugMobileView(props: GameMobileProps<DebugState>) {
-  const counter = props.pluginState?.counter ?? 0;
-  const ticks = props.pluginState?.ticks ?? 0;
+  const state = props.gameState;
+  const counter = state?.counter ?? 0;
+  const ticks = state?.ticks ?? 0;
 
   return (
     <div className="plugin-stack">
@@ -45,14 +67,14 @@ function DebugMobileView(props: GameMobileProps<DebugState>) {
 }
 
 function DebugCentralView(props: GameCentralProps<DebugState>) {
-  const state = props.pluginState;
+  const state = props.gameState;
 
   return (
     <div className="plugin-stack">
       <p className="plugin-copy">{state === null ? "Plugin state pending." : createSummary(state)}</p>
       <div className="plugin-stats">
         <span>Connected {state?.connectedPlayers ?? props.players.length}</span>
-        <span>Session {props.sessionId ?? "pending"}</span>
+        <span>Session {props.hubSession?.sessionId ?? "pending"}</span>
       </div>
       <button type="button" onClick={() => void props.invokeHostAction("increment", 1)}>
         Increment From Host
@@ -63,6 +85,7 @@ function DebugCentralView(props: GameCentralProps<DebugState>) {
 
 export const gamePlugin = createGamePlugin<DebugState, number>({
   central: DebugCentralView,
+  controls: buildDebugControls,
   createInitialState() {
     return {
       connectedPlayers: 0,

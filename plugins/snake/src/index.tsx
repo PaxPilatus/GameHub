@@ -1,9 +1,10 @@
-﻿import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { InputMessage } from "@game-hub/protocol";
 import {
   createGamePlugin,
   type GameCentralProps,
+  type GameControlsResolverContext,
   type GameHostApi,
   type GameMobileProps,
 } from "@game-hub/sdk";
@@ -40,7 +41,7 @@ const snakeContext = createSnakeContext({
 let runtimeState = createInitialSnakeEngineState([], snakeContext);
 
 function SnakeMobileView(props: GameMobileProps<SnakeState>) {
-  const state = props.pluginState;
+  const state = asSnakeState(props.gameState);
   const playerSnake =
     props.playerId === null || state === null
       ? null
@@ -66,7 +67,7 @@ function SnakeMobileView(props: GameMobileProps<SnakeState>) {
                   : state.latestMessage}
           </strong>
           <span>
-            Relay {props.hostState?.relayStatus ?? "pending"} · phase {props.phase}
+            Relay {props.hubSession?.relayStatus ?? "pending"} / phase {props.phase}
           </span>
         </div>
         <div className="snake-mobile-meta">
@@ -120,7 +121,7 @@ function SnakeMobileView(props: GameMobileProps<SnakeState>) {
       </div>
 
       <div className="snake-mobile-stats">
-        <span>Grid {state?.grid.width ?? snakeContext.gridWidth} × {state?.grid.height ?? snakeContext.gridHeight}</span>
+        <span>Grid {state?.grid.width ?? snakeContext.gridWidth} x {state?.grid.height ?? snakeContext.gridHeight}</span>
         <span>Tick {state?.tick ?? 0}</span>
         <span>Alive {state?.aliveCount ?? 0}</span>
       </div>
@@ -128,14 +129,82 @@ function SnakeMobileView(props: GameMobileProps<SnakeState>) {
   );
 }
 
+interface SnakeCanvasSize {
+  height: number;
+  width: number;
+}
+
 function SnakeCentralView(props: GameCentralProps<SnakeState>) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const state = props.pluginState;
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const state = asSnakeState(props.gameState);
+  const [canvasSize, setCanvasSize] = useState<SnakeCanvasSize>({
+    height: snakeContext.gridHeight * 18,
+    width: snakeContext.gridWidth * 18,
+  });
+
+  useEffect(() => {
+    const stage = stageRef.current;
+
+    if (stage === null) {
+      return;
+    }
+
+    const gridWidth = state?.grid.width ?? snakeContext.gridWidth;
+    const gridHeight = state?.grid.height ?? snakeContext.gridHeight;
+    const updateCanvasSize = () => {
+      const styles = window.getComputedStyle(stage);
+      const availableWidth = Math.max(
+        0,
+        stage.clientWidth -
+          Number.parseFloat(styles.paddingLeft) -
+          Number.parseFloat(styles.paddingRight),
+      );
+      const availableHeight = Math.max(
+        0,
+        stage.clientHeight -
+          Number.parseFloat(styles.paddingTop) -
+          Number.parseFloat(styles.paddingBottom),
+      );
+      const nextSize = fitSnakeCanvasToViewport(
+        availableWidth,
+        availableHeight,
+        gridWidth,
+        gridHeight,
+      );
+
+      setCanvasSize((current) =>
+        current.width === nextSize.width && current.height === nextSize.height
+          ? current
+          : nextSize,
+      );
+    };
+
+    updateCanvasSize();
+
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      updateCanvasSize();
+    });
+    observer.observe(stage);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [state?.grid.height, state?.grid.width]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
 
-    if (canvas === null || state === null) {
+    if (
+      canvas === null ||
+      state === null ||
+      canvasSize.width <= 0 ||
+      canvasSize.height <= 0
+    ) {
       return;
     }
 
@@ -145,26 +214,38 @@ function SnakeCentralView(props: GameCentralProps<SnakeState>) {
       return;
     }
 
-    const cellSize = 18;
-    canvas.width = state.grid.width * cellSize;
-    canvas.height = state.grid.height * cellSize;
+    const pixelRatio = window.devicePixelRatio || 1;
+    const displayWidth = canvasSize.width;
+    const displayHeight = canvasSize.height;
+    const cellWidth = displayWidth / state.grid.width;
+    const cellHeight = displayHeight / state.grid.height;
+    const inset = Math.max(1, Math.min(cellWidth, cellHeight) * 0.08);
 
+    canvas.width = Math.floor(displayWidth * pixelRatio);
+    canvas.height = Math.floor(displayHeight * pixelRatio);
+    canvas.style.width = `${displayWidth}px`;
+    canvas.style.height = `${displayHeight}px`;
+
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    context.clearRect(0, 0, displayWidth, displayHeight);
     context.fillStyle = "#09131b";
-    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillRect(0, 0, displayWidth, displayHeight);
     context.strokeStyle = "rgba(255, 255, 255, 0.08)";
     context.lineWidth = 1;
 
     for (let x = 0; x <= state.grid.width; x += 1) {
+      const xOffset = x * cellWidth;
       context.beginPath();
-      context.moveTo(x * cellSize + 0.5, 0);
-      context.lineTo(x * cellSize + 0.5, canvas.height);
+      context.moveTo(xOffset + 0.5, 0);
+      context.lineTo(xOffset + 0.5, displayHeight);
       context.stroke();
     }
 
     for (let y = 0; y <= state.grid.height; y += 1) {
+      const yOffset = y * cellHeight;
       context.beginPath();
-      context.moveTo(0, y * cellSize + 0.5);
-      context.lineTo(canvas.width, y * cellSize + 0.5);
+      context.moveTo(0, yOffset + 0.5);
+      context.lineTo(displayWidth, yOffset + 0.5);
       context.stroke();
     }
 
@@ -179,76 +260,146 @@ function SnakeCentralView(props: GameCentralProps<SnakeState>) {
         context.fillStyle =
           index === 0 ? snake.color : withAlpha(snake.color, snake.alive ? 0.72 : 0.35);
         context.fillRect(
-          segment.x * cellSize + 1,
-          segment.y * cellSize + 1,
-          cellSize - 2,
-          cellSize - 2,
+          segment.x * cellWidth + inset,
+          segment.y * cellHeight + inset,
+          Math.max(1, cellWidth - inset * 2),
+          Math.max(1, cellHeight - inset * 2),
         );
       }
     }
-  }, [state]);
+  }, [canvasSize.height, canvasSize.width, state]);
 
   return (
-    <div className="plugin-stack snake-central-stack">
-      <div className="snake-banner">
-        <div>
-          <strong>
-            {state === null
-              ? "Snake state pending."
-              : state.stage === "game_over"
-                ? state.winnerPlayerId === null
-                  ? "Round ended in a draw."
-                  : `${resolvePlayerName(state.snakes, state.winnerPlayerId)} won the round.`
-                : state.latestMessage}
-          </strong>
+    <div className="snake-central-stage">
+      <div ref={stageRef} className="snake-canvas-stage">
+        <canvas ref={canvasRef} className="snake-canvas" />
+        <div className="snake-stage-overlay">
+          <strong>{resolveSnakeCentralMessage(state)}</strong>
           <span>
-            Relay {props.relayStatus ?? "pending"} · session {props.sessionId ?? "pending"}
+            {state?.stage ?? "lobby"} / {state?.tickHz ?? snakeContext.tickHz} Hz / {state?.aliveCount ?? 0} alive
           </span>
         </div>
-        <div className="snake-central-meta">
-          <span>{state?.stage ?? "lobby"}</span>
-          <span>{state?.tickHz ?? snakeContext.tickHz} Hz</span>
-          <span>{state?.aliveCount ?? 0} alive</span>
-        </div>
       </div>
-
-      <div className="snake-canvas-shell">
-        <canvas ref={canvasRef} className="snake-canvas" />
-      </div>
-
-      <div className="snake-scoreboard">
-        {state?.snakes.map((snake) => (
-          <article key={snake.playerId} className="snake-score-row">
-            <div className="snake-score-player">
-              <span className="snake-color-dot" style={{ backgroundColor: snake.color }} />
-              <div>
-                <strong>{snake.name}</strong>
-                <span>
-                  Team {snake.team} · {snake.connected ? "connected" : "offline"}
-                </span>
-              </div>
-            </div>
-            <div className="snake-score-meta">
-              <span>{snake.alive ? "alive" : "dead"}</span>
-              <span>{snake.wins} wins</span>
-              <span>{snake.direction}</span>
-            </div>
-          </article>
-        ))}
-      </div>
-
-      {state?.stage === "game_over" ? (
-        <button
-          type="button"
-          onClick={() => {
-            void props.invokeHostAction(SNAKE_RESTART_ACTION);
-          }}
-        >
-          Restart Round
-        </button>
-      ) : null}
     </div>
   );
+}
+
+function buildSnakeControls(
+  context: GameControlsResolverContext<SnakeState>,
+) {
+  const state = asSnakeState(context.gameState);
+  const playerSnake =
+    context.playerId === null || state === null
+      ? null
+      : state.snakes.find((snake) => snake.playerId === context.playerId) ?? null;
+  const controlsEnabled =
+    state?.stage === "running" &&
+    context.phase === "game_running" &&
+    playerSnake?.alive === true;
+
+  return {
+    controls: [
+      {
+        kind: "notice" as const,
+        text:
+          state === null
+            ? "Snake state pending."
+            : controlsEnabled
+              ? "Use the D-pad. The latest direction before the next tick wins."
+              : state.stage === "game_over"
+                ? state.latestMessage
+                : "Controls unlock once the host starts the next round.",
+      },
+      {
+        action: SNAKE_DIRECTION_ACTION,
+        disabled: !controlsEnabled,
+        kind: "dpad" as const,
+      },
+    ],
+  };
+}
+
+function publishSnakeHubState(api: GameHostApi<SnakeState>): void {
+  api.ui.publishStatusBadges([
+    {
+      id: "snake-stage",
+      label: "Stage",
+      value: runtimeState.publicState.stage,
+    },
+    {
+      id: "snake-grid",
+      label: "Grid",
+      value: `${runtimeState.publicState.grid.width}x${runtimeState.publicState.grid.height}`,
+    },
+    {
+      id: "snake-alive",
+      label: "Alive",
+      value: String(runtimeState.publicState.aliveCount),
+    },
+  ]);
+
+  for (const snake of runtimeState.publicState.snakes) {
+    const status = !snake.connected
+      ? "offline"
+      : runtimeState.publicState.stage === "running"
+        ? snake.alive
+          ? "alive"
+          : "dead"
+        : "spectating";
+    api.results.setPlayerStatus(snake.playerId, status);
+  }
+
+  if (runtimeState.publicState.stage === "game_over") {
+    api.ui.setOverlay({
+      message: runtimeState.publicState.latestMessage,
+      title: "Snake round finished",
+      tone: runtimeState.publicState.winnerPlayerId === null ? "info" : "success",
+    });
+    return;
+  }
+
+  api.ui.clearOverlay();
+}
+function fitSnakeCanvasToViewport(
+  availableWidth: number,
+  availableHeight: number,
+  gridWidth: number,
+  gridHeight: number,
+): SnakeCanvasSize {
+  if (availableWidth <= 0 || availableHeight <= 0 || gridWidth <= 0 || gridHeight <= 0) {
+    return {
+      height: gridHeight,
+      width: gridWidth,
+    };
+  }
+
+  const widthLimitedHeight = availableWidth * (gridHeight / gridWidth);
+
+  if (widthLimitedHeight <= availableHeight) {
+    return {
+      height: Math.max(1, Math.floor(widthLimitedHeight)),
+      width: Math.max(1, Math.floor(availableWidth)),
+    };
+  }
+
+  return {
+    height: Math.max(1, Math.floor(availableHeight)),
+    width: Math.max(1, Math.floor(availableHeight * (gridWidth / gridHeight))),
+  };
+}
+
+function resolveSnakeCentralMessage(state: SnakeState | null): string {
+  if (state === null) {
+    return "Snake state pending.";
+  }
+
+  if (state.stage === "game_over") {
+    return state.winnerPlayerId === null
+      ? "Round ended in a draw."
+      : `${resolvePlayerName(state.snakes, state.winnerPlayerId)} won the round.`;
+  }
+
+  return state.latestMessage;
 }
 
 interface DirectionButtonProps {
@@ -259,10 +410,10 @@ interface DirectionButtonProps {
 
 function DirectionButton(props: DirectionButtonProps) {
   const labels: Record<SnakeDirection, string> = {
-    down: "↓",
-    left: "←",
-    right: "→",
-    up: "↑",
+    down: "?",
+    left: "?",
+    right: "?",
+    up: "?",
   };
 
   return (
@@ -340,6 +491,7 @@ function syncPlayers(api: GameHostApi<SnakeState>): void {
 
 export const gamePlugin = createGamePlugin<SnakeState, SnakeInputPayload>({
   central: SnakeCentralView,
+  controls: buildSnakeControls,
   createInitialState() {
     return createInitialSnakeEngineState([], snakeContext).publicState;
   },
@@ -368,6 +520,7 @@ export const gamePlugin = createGamePlugin<SnakeState, SnakeInputPayload>({
           snakeContext,
         ),
       );
+      publishSnakeHubState(api);
       api.log("info", "snake_started", "Snake round started.", {
         gridHeight: snakeContext.gridHeight,
         gridWidth: snakeContext.gridWidth,
@@ -386,6 +539,7 @@ export const gamePlugin = createGamePlugin<SnakeState, SnakeInputPayload>({
           snakeContext,
         ),
       );
+      publishSnakeHubState(api);
       api.log("info", "snake_stopped", "Snake round stopped.", {});
     },
     onInput(api, input) {
@@ -403,6 +557,7 @@ export const gamePlugin = createGamePlugin<SnakeState, SnakeInputPayload>({
             snakeContext,
           ),
         );
+        publishSnakeHubState(api);
         return;
       }
 
@@ -418,14 +573,17 @@ export const gamePlugin = createGamePlugin<SnakeState, SnakeInputPayload>({
             snakeContext,
           ),
         );
+        publishSnakeHubState(api);
         api.log("info", "snake_restarted", "Snake round restarted by host action.", {});
       }
     },
     onPlayerJoin(api) {
       syncPlayers(api);
+      publishSnakeHubState(api);
     },
     onPlayerLeave(api) {
       syncPlayers(api);
+      publishSnakeHubState(api);
     },
     onPlayerReconnect(api, player) {
       const previousSnake = runtimeState.publicState.snakes.find(
@@ -455,10 +613,14 @@ export const gamePlugin = createGamePlugin<SnakeState, SnakeInputPayload>({
           playerId: player.playerId,
         });
       }
+
+      publishSnakeHubState(api);
     },
     onSessionCreated(api) {
       runtimeState = createInitialSnakeEngineState(api.getPlayers(), snakeContext);
+      api.results.clearLeaderboard();
       api.setState(runtimeState.publicState);
+      publishSnakeHubState(api);
       api.log("info", "snake_session_created", "Snake plugin attached to session.", {
         tickHz: snakeContext.tickHz,
       });
@@ -484,10 +646,19 @@ export const gamePlugin = createGamePlugin<SnakeState, SnakeInputPayload>({
         runtimeState.publicState.stage === "game_over" &&
         runtimeState.publicState.winnerPlayerId !== previousWinnerPlayerId
       ) {
+        if (runtimeState.publicState.winnerPlayerId !== null) {
+          api.results.recordPlayerWin(runtimeState.publicState.winnerPlayerId);
+        }
+        api.results.endRound({
+          message: runtimeState.publicState.latestMessage,
+          title: "Snake round finished",
+        });
         api.log("info", "snake_round_finished", "Snake round finished.", {
           winnerPlayerId: runtimeState.publicState.winnerPlayerId,
         });
       }
+
+      publishSnakeHubState(api);
     },
   },
 });
@@ -521,3 +692,62 @@ function withAlpha(hexColor: string, alpha: number): string {
 export const manifest = gamePlugin.manifest;
 export default gamePlugin;
 export type { SnakeActionPayload, SnakeDirectionPayload, SnakeInputPayload, SnakePoint };
+
+function asSnakeState(value: unknown): SnakeState | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  if (!isSnakeGrid(value.grid) || !Array.isArray(value.snakes)) {
+    return null;
+  }
+
+  if (!value.snakes.every((snake) => isSnakePlayerState(snake))) {
+    return null;
+  }
+
+  if (
+    value.stage !== "lobby" &&
+    value.stage !== "running" &&
+    value.stage !== "game_over"
+  ) {
+    return null;
+  }
+
+  return value as SnakeState;
+}
+
+function isSnakeGrid(value: unknown): value is SnakeState["grid"] {
+  return (
+    isRecord(value) &&
+    typeof value.width === "number" &&
+    typeof value.height === "number"
+  );
+}
+
+function isSnakePlayerState(value: unknown): value is SnakePlayerState {
+  return (
+    isRecord(value) &&
+    typeof value.playerId === "string" &&
+    typeof value.name === "string" &&
+    typeof value.team === "string" &&
+    typeof value.connected === "boolean" &&
+    typeof value.alive === "boolean" &&
+    typeof value.direction === "string" &&
+    typeof value.color === "string" &&
+    typeof value.wins === "number" &&
+    Array.isArray(value.segments) &&
+    value.segments.every((segment) => isSnakePoint(segment))
+  );
+}
+
+function isSnakePoint(value: unknown): value is SnakePoint {
+  return isRecord(value) && typeof value.x === "number" && typeof value.y === "number";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+
+

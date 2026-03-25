@@ -5,8 +5,10 @@ import {
   safeParseHubMessage,
   type GameStateMessage,
   type HelloAckMessage,
+  type HostPlayerState,
   type HostHelloMessage,
   type HubMessage,
+  type HubStatePayload,
   type InputMessage,
   type InputValue,
   type PluginLoadedMessage,
@@ -19,6 +21,11 @@ import WebSocket from "ws";
 
 import { PluginRegistry } from "./plugin-registry.js";
 import { HostPluginRuntime } from "./plugin-runtime.js";
+import {
+  sanitizeDiagnosticEvent,
+  sanitizeHostSnapshot,
+  sanitizeStructuredData,
+} from "./security.js";
 import { HostSessionStore } from "./store.js";
 import type {
   HostDiagnosticEvent,
@@ -30,6 +37,9 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_RELAY_BASE_URL = "http://127.0.0.1:8787";
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
 const MAX_DIAGNOSTICS = 200;
+const MAX_OUTBOUND_GAME_STATE_BYTES = 4 * 1024;
+const SOCKET_SHUTDOWN_TIMEOUT_MS = 200;
+const STATE_SIZE_DIAGNOSTIC_THROTTLE_MS = 1000;
 
 export interface HostServiceOptions {
   fetchImpl?: typeof fetch;
@@ -64,6 +74,8 @@ export class HostService {
   private hostSecret: string | null = null;
   private readonly heartbeatIntervalMs: number;
   private initialized = false;
+  private lastOversizedStateAt: number | null = null;
+  private lifecycleQueue: Promise<void> = Promise.resolve();
   private readonly now: () => number;
   private readonly pluginRegistry: PluginRegistry;
   private readonly pluginRuntime: HostPluginRuntime;
@@ -86,16 +98,25 @@ export class HostService {
     this.webSocketCtor = options.webSocketCtor ?? WebSocket;
     this.pluginRegistry = new PluginRegistry();
     this.pluginRuntime = new HostPluginRuntime({
+      applyResultEvent: (event, now) => {
+        this.sessionStore.applyResultEvent(event, now);
+      },
       getSnapshot: () => this.sessionStore.getSnapshot(),
       now: this.now,
       onDiagnostic: (level, type, message, data) => {
         this.pushDiagnostic(level, type, message, data);
       },
       onTickStateChange: () => {
-        const snapshot = this.syncPluginState(this.now());
+        const snapshot = this.syncGameState(this.now());
         this.publishSnapshot(snapshot, true);
       },
+      publishStatusBadges: (badges, now) => {
+        this.sessionStore.publishStatusBadges(badges, now);
+      },
       registry: this.pluginRegistry,
+      setOverlay: (overlay, now) => {
+        this.sessionStore.setOverlay(overlay, now);
+      },
     });
   }
 
@@ -113,14 +134,11 @@ export class HostService {
   }
 
   getDiagnostics(): HostDiagnosticEvent[] {
-    return this.diagnostics.map((event) => ({
-      ...event,
-      data: { ...event.data },
-    }));
+    return this.diagnostics.map((event) => sanitizeDiagnosticEvent(event));
   }
 
   getSnapshot(): HostSnapshot {
-    return this.sessionStore.getSnapshot();
+    return sanitizeHostSnapshot(this.sessionStore.getSnapshot());
   }
 
   subscribeDiagnostics(listener: DiagnosticListener): () => void {
@@ -138,8 +156,102 @@ export class HostService {
   }
 
   async restartSession(): Promise<void> {
-    await this.stop("session_restart");
-    await this.start();
+    await this.runLifecycleOperation(async () => {
+      await this.stopInternal("session_restart");
+      await this.startInternal();
+    });
+  }
+
+  async restartGame(): Promise<void> {
+    const snapshot = this.getSnapshot();
+
+    if (snapshot.selectedGame === null) {
+      this.pushDiagnostic(
+        "warn",
+        "restart_game_missing_selection",
+        "Select a game before restarting it.",
+        {},
+      );
+      return;
+    }
+
+    if (snapshot.sessionId === null || snapshot.relayStatus !== "connected") {
+      this.pushDiagnostic(
+        "warn",
+        "restart_game_session_unavailable",
+        "Game restart requires an active relay session.",
+        {
+          relayStatus: snapshot.relayStatus,
+          sessionId: snapshot.sessionId ?? "",
+        },
+      );
+      return;
+    }
+
+    if (!canRestartGame(snapshot.lifecycle)) {
+      this.pushDiagnostic(
+        "warn",
+        "restart_game_invalid_state",
+        "Game cannot restart in the current state.",
+        {
+          lifecycle: snapshot.lifecycle,
+        },
+      );
+      return;
+    }
+
+    const gameId = snapshot.selectedGame;
+
+    if (snapshot.lifecycle === "game_running") {
+      const stopAt = this.now();
+      this.pluginRuntime.handleGameStop();
+      this.sessionStore.setLifecycle("lobby", stopAt);
+      this.sendMessage<StopGameMessage>({
+        id: randomUUID(),
+        reason: "restart_game",
+        sentAt: stopAt,
+        type: "stop_game",
+      });
+      this.publishSnapshot(this.syncGameState(stopAt), true);
+    }
+
+    const resetAt = this.now();
+    this.publishSnapshot(this.sessionStore.setGameState(null, resetAt), true);
+
+    const selectedManifest =
+      (await this.pluginRuntime.reinitializeActivePlugin()) ??
+      (await this.pluginRuntime.selectPlugin(gameId));
+
+    const readyAt = this.now();
+    this.sessionStore.setLifecycle("lobby", readyAt);
+    const readySnapshot = this.syncGameState(readyAt);
+
+    this.pushDiagnostic("info", "game_restarted", `Restarted ${gameId}.`, {
+      gameId,
+      sessionId: snapshot.sessionId ?? "",
+    });
+    this.sendMessage<PluginLoadedMessage>({
+      id: randomUUID(),
+      pluginId: gameId,
+      sentAt: readyAt,
+      type: "plugin_loaded",
+      version: selectedManifest.version,
+    });
+    this.publishSnapshot(readySnapshot, true);
+
+    const startAt = this.now();
+    this.sessionStore.setLifecycle("game_running", startAt);
+    this.pluginRuntime.handleGameStart();
+    const runningSnapshot = this.syncGameState(startAt);
+
+    this.sendMessage<StartGameMessage>({
+      id: randomUUID(),
+      pluginId: gameId,
+      seed: startAt,
+      sentAt: startAt,
+      type: "start_game",
+    });
+    this.publishSnapshot(runningSnapshot, true);
   }
 
   async selectGame(gameId: string): Promise<void> {
@@ -154,10 +266,28 @@ export class HostService {
       return;
     }
 
+    const currentSnapshot = this.getSnapshot();
+
+    if (currentSnapshot.lifecycle === "game_running") {
+      this.pushDiagnostic(
+        "warn",
+        "select_game_while_running",
+        "Stop or restart the running game before switching plugins.",
+        {
+          gameId,
+          lifecycle: currentSnapshot.lifecycle,
+          selectedGame: currentSnapshot.selectedGame,
+        },
+      );
+      return;
+    }
+
     const now = this.now();
-    this.sessionStore.setSelectedGame(gameId, now);
+    const pendingSnapshot = this.sessionStore.setSelectedGame(gameId, now);
+    this.publishSnapshot(pendingSnapshot, true);
+
     const selectedManifest = await this.pluginRuntime.selectPlugin(gameId);
-    const snapshot = this.syncPluginState(now);
+    const snapshot = this.syncGameState(this.now());
 
     this.pushDiagnostic("info", "game_selected", `Selected game ${gameId}.`, {
       gameId,
@@ -176,9 +306,9 @@ export class HostService {
     this.pluginRuntime.handleHostAction(action, payload);
     this.pushDiagnostic("info", "plugin_host_action", `Host invoked ${action}.`, {
       action,
-      payload,
+      payload: payload === undefined ? undefined : sanitizeStructuredData(payload),
     });
-    const snapshot = this.syncPluginState(this.now());
+    const snapshot = this.syncGameState(this.now());
     this.publishSnapshot(snapshot, true);
   }
 
@@ -206,6 +336,10 @@ export class HostService {
   }
 
   async start(): Promise<void> {
+    await this.runLifecycleOperation(() => this.startInternal());
+  }
+
+  private async startInternal(): Promise<void> {
     await this.initialize();
 
     this.pushDiagnostic("info", "host_starting", "Creating relay session.", {
@@ -228,7 +362,7 @@ export class HostService {
     );
 
     await this.pluginRuntime.handleSessionCreated();
-    this.publishSnapshot(this.syncPluginState(this.now()), false);
+    this.publishSnapshot(this.syncGameState(this.now()), false);
 
     this.pushDiagnostic("info", "session_created", "Relay session created.", {
       joinUrl: createResponse.joinUrl,
@@ -256,7 +390,7 @@ export class HostService {
     const now = this.now();
     this.sessionStore.setLifecycle("game_running", now);
     this.pluginRuntime.handleGameStart();
-    const nextSnapshot = this.syncPluginState(now);
+    const nextSnapshot = this.syncGameState(now);
 
     this.pushDiagnostic("info", "game_started", `Started ${snapshot.selectedGame}.`, {
       gameId: snapshot.selectedGame,
@@ -272,6 +406,10 @@ export class HostService {
   }
 
   async stop(reason = "stopped_by_host"): Promise<void> {
+    await this.runLifecycleOperation(() => this.stopInternal(reason));
+  }
+
+  private async stopInternal(reason = "stopped_by_host"): Promise<void> {
     this.clearHeartbeat();
 
     const snapshot = this.getSnapshot();
@@ -297,21 +435,20 @@ export class HostService {
       id: randomUUID(),
       reason,
       sentAt: this.now(),
-      sessionId: snapshot.sessionId,
+      sessionId: snapshot.sessionId ?? "",
       type: "session_terminated",
     });
 
     if (this.socket !== null) {
       const currentSocket = this.socket;
       this.socket = null;
-      currentSocket.removeAllListeners();
-      currentSocket.close();
+      await this.shutdownSocket(currentSocket, reason);
     }
 
     this.pluginRuntime.reset();
     this.pushDiagnostic("info", "host_stopped", "Host session closed.", {
       reason,
-      sessionId: snapshot.sessionId,
+      sessionId: snapshot.sessionId ?? "",
     });
     this.publishSnapshot(this.sessionStore.terminate(this.now()), false);
     this.hostSecret = null;
@@ -330,7 +467,7 @@ export class HostService {
     const now = this.now();
     this.sessionStore.setLifecycle("game_finished", now);
     this.pluginRuntime.handleGameStop();
-    const nextSnapshot = this.syncPluginState(now);
+    const nextSnapshot = this.syncGameState(now);
 
     this.pushDiagnostic("info", "game_stopped", "Game stopped.", {
       gameId: snapshot.selectedGame,
@@ -393,7 +530,7 @@ export class HostService {
           return;
         }
 
-        this.handleRelayMessage(parsed);
+        this.handleRelayMessage(socket, parsed);
 
         if (!settled && parsed.type === "hello_ack") {
           settled = true;
@@ -404,7 +541,7 @@ export class HostService {
 
       const onClose = (code: number) => {
         cleanup();
-        this.handleSocketClose(code);
+        this.handleSocketClose(socket, code);
 
         if (!settled) {
           reject(
@@ -417,13 +554,15 @@ export class HostService {
 
       const onError = (error: Error) => {
         cleanup();
-        this.pushDiagnostic("error", "relay_socket_error", error.message, {
-          relayWebSocketUrl,
-        });
-        this.publishSnapshot(
-          this.sessionStore.markRelayStatus("error", this.now()),
-          false,
-        );
+        if (this.isCurrentSocket(socket)) {
+          this.pushDiagnostic("error", "relay_socket_error", error.message, {
+            relayWebSocketUrl,
+          });
+          this.publishSnapshot(
+            this.sessionStore.markRelayStatus("error", this.now()),
+            false,
+          );
+        }
 
         if (!settled) {
           reject(error);
@@ -437,6 +576,10 @@ export class HostService {
     });
 
     socket.on("message", (raw: WebSocket.RawData) => {
+      if (!this.isCurrentSocket(socket)) {
+        return;
+      }
+
       const parsed = parseRelayMessage(raw);
 
       if (parsed === null) {
@@ -449,14 +592,18 @@ export class HostService {
         return;
       }
 
-      this.handleRelayMessage(parsed);
+      this.handleRelayMessage(socket, parsed);
     });
 
     socket.on("close", (code: number) => {
-      this.handleSocketClose(code);
+      this.handleSocketClose(socket, code);
     });
 
     socket.on("error", (error: Error) => {
+      if (!this.isCurrentSocket(socket)) {
+        return;
+      }
+
       this.pushDiagnostic("error", "relay_socket_error", error.message, {});
       this.publishSnapshot(
         this.sessionStore.markRelayStatus("error", this.now()),
@@ -510,13 +657,11 @@ export class HostService {
       pluginId: snapshot.selectedGame ?? "lobby",
       sentAt: this.now(),
       state: {
-        lifecycle: snapshot.lifecycle,
-        moderatorId: snapshot.moderatorId,
-        players: snapshot.players.map((player) => sanitizePlayer(player)),
-        pluginState: snapshot.pluginState,
-        relayStatus: snapshot.relayStatus,
-        selectedGame: snapshot.selectedGame,
-        sessionId: snapshot.sessionId,
+        gameState:
+          snapshot.gameState === null
+            ? null
+            : sanitizeStructuredData(snapshot.gameState),
+        hubState: buildHubState(snapshot),
       },
       tick: this.stateVersion,
       type: "game_state",
@@ -530,7 +675,11 @@ export class HostService {
     }
   }
 
-  private handleRelayMessage(message: HubMessage): void {
+  private handleRelayMessage(socket: WebSocket, message: HubMessage): void {
+    if (!this.isCurrentSocket(socket)) {
+      return;
+    }
+
     const now = this.now();
     this.sessionStore.noteRelayMessage(now);
 
@@ -559,7 +708,6 @@ export class HostService {
           name: message.playerName,
           playerId: message.playerId,
           reconnect: message.reconnect ?? false,
-          token: message.playerToken ?? null,
         });
         const player = playerSnapshot.players.find(
           (candidate) => candidate.playerId === message.playerId,
@@ -582,7 +730,7 @@ export class HostService {
           );
         }
 
-        this.publishSnapshot(this.syncPluginState(now), true);
+        this.publishSnapshot(this.syncGameState(now), true);
         return;
       }
       case "player_left": {
@@ -604,7 +752,7 @@ export class HostService {
           this.pluginRuntime.handlePlayerLeft(sanitizeGamePlayer(player));
         }
 
-        this.publishSnapshot(this.syncPluginState(now), true);
+        this.publishSnapshot(this.syncGameState(now), true);
         return;
       }
       case "input": {
@@ -623,8 +771,9 @@ export class HostService {
           hostReceivedAt: now,
           latencyEstimateMs,
           playerId: message.playerId,
+          sequence: message.sequence,
         });
-        this.publishSnapshot(this.syncPluginState(now), true);
+        this.publishSnapshot(this.syncGameState(now), true);
         return;
       }
       case "session_terminated": {
@@ -653,7 +802,12 @@ export class HostService {
     }
   }
 
-  private handleSocketClose(code: number): void {
+  private handleSocketClose(socket: WebSocket, code: number): void {
+    if (!this.isCurrentSocket(socket)) {
+      return;
+    }
+
+    this.socket = null;
     this.clearHeartbeat();
 
     const snapshot = this.getSnapshot();
@@ -668,15 +822,88 @@ export class HostService {
     this.publishSnapshot(this.sessionStore.terminate(this.now()), false);
   }
 
+  private isCurrentSocket(socket: WebSocket): boolean {
+    return this.socket === socket;
+  }
+
+  private async runLifecycleOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.lifecycleQueue.then(operation, operation);
+    this.lifecycleQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async shutdownSocket(socket: WebSocket, reason: string): Promise<void> {
+    const waitForShutdown = this.waitForSocketShutdown(socket);
+
+    try {
+      if (socket.readyState === WebSocket.CONNECTING) {
+        socket.terminate();
+      } else if (socket.readyState === WebSocket.OPEN) {
+        socket.close(1000, reason);
+      }
+    } catch {
+      try {
+        socket.terminate();
+      } catch {
+        // Ignore socket teardown failures and continue with shutdown.
+      }
+    }
+
+    await waitForShutdown;
+  }
+
+  private waitForSocketShutdown(socket: WebSocket): Promise<void> {
+    if (socket.readyState === WebSocket.CLOSED) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve) => {
+      let settled = false;
+
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timeoutHandle);
+        socket.off("close", onClose);
+        socket.off("error", onError);
+        resolve();
+      };
+
+      const onClose = () => {
+        finish();
+      };
+
+      const onError = () => {
+        finish();
+      };
+
+      const timeoutHandle = setTimeout(() => {
+        finish();
+      }, SOCKET_SHUTDOWN_TIMEOUT_MS);
+      timeoutHandle.unref?.();
+
+      socket.once("close", onClose);
+      socket.once("error", onError);
+    });
+  }
+
   private publishSnapshot(snapshot: HostSnapshot, broadcastToRelay: boolean): void {
+    const sanitizedSnapshot = sanitizeHostSnapshot(snapshot);
+
     for (const listener of this.snapshotListeners) {
-      listener(snapshot);
+      listener(sanitizedSnapshot);
     }
 
     if (broadcastToRelay) {
       const stateMessage = this.buildStateMessage(snapshot);
       if (stateMessage !== null) {
-        this.sendMessage(stateMessage);
+        this.sendStateMessage(stateMessage);
       }
     }
   }
@@ -687,14 +914,14 @@ export class HostService {
     message: string,
     data: Record<string, unknown>,
   ): void {
-    const event: HostDiagnosticEvent = {
+    const event = sanitizeDiagnosticEvent({
       data,
       id: randomUUID(),
       level,
       message,
       timestamp: this.now(),
       type,
-    };
+    });
 
     this.diagnostics.unshift(event);
     this.diagnostics.splice(MAX_DIAGNOSTICS);
@@ -711,14 +938,45 @@ export class HostService {
       | PluginLoadedMessage
       | SessionTerminatedMessage
       | StartGameMessage
-      | StopGameMessage
-      | GameStateMessage,
+      | StopGameMessage,
   >(message: TMessage): void {
     if (this.socket === null || this.socket.readyState !== WebSocket.OPEN) {
       return;
     }
 
     this.socket.send(JSON.stringify(message));
+  }
+
+  private sendStateMessage(message: GameStateMessage): void {
+    if (this.socket === null || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const serialized = JSON.stringify(message);
+    const payloadSize = Buffer.byteLength(serialized, "utf8");
+
+    if (payloadSize > MAX_OUTBOUND_GAME_STATE_BYTES) {
+      const now = this.now();
+      if (
+        this.lastOversizedStateAt === null ||
+        now - this.lastOversizedStateAt >= STATE_SIZE_DIAGNOSTIC_THROTTLE_MS
+      ) {
+        this.lastOversizedStateAt = now;
+        this.pushDiagnostic(
+          "warn",
+          "game_state_too_large",
+          "Game state broadcast exceeded the configured relay-safe size limit and was dropped.",
+          {
+            limitBytes: MAX_OUTBOUND_GAME_STATE_BYTES,
+            payloadBytes: payloadSize,
+            pluginId: message.pluginId,
+          },
+        );
+      }
+      return;
+    }
+
+    this.socket.send(serialized);
   }
 
   private startHeartbeat(): void {
@@ -739,9 +997,44 @@ export class HostService {
     this.heartbeatTimer.unref?.();
   }
 
-  private syncPluginState(now: number): HostSnapshot {
-    return this.sessionStore.setPluginState(this.pluginRuntime.getPluginState(), now);
+  private syncGameState(now: number): HostSnapshot {
+    return this.sessionStore.setGameState(this.pluginRuntime.getGameState(), now);
   }
+}
+
+function buildHubState(snapshot: HostSnapshot): HubStatePayload {
+  return {
+    joinUrl: snapshot.joinUrl,
+    lastRelayMessageAt: snapshot.lastRelayMessageAt,
+    leaderboard: snapshot.leaderboard.map((entry) => ({ ...entry })),
+    lifecycle: snapshot.lifecycle,
+    matchStatus: { ...snapshot.matchStatus },
+    moderatorId: snapshot.moderatorId,
+    overlay:
+      snapshot.overlay === null
+        ? null
+        : {
+            ...snapshot.overlay,
+            tone: snapshot.overlay.tone ?? "info",
+          },
+    players: snapshot.players.map((player) => sanitizePlayer(player)),
+    relayStatus: snapshot.relayStatus,
+    selectedGame: snapshot.selectedGame,
+    sessionId: snapshot.sessionId ?? "",
+    statusBadges: snapshot.statusBadges.map((badge) => ({
+      ...badge,
+      tone: badge.tone ?? "neutral",
+    })),
+    updatedAt: snapshot.updatedAt,
+  };
+}
+
+function canRestartGame(lifecycle: HostSnapshot["lifecycle"]): boolean {
+  return (
+    lifecycle === "lobby" ||
+    lifecycle === "game_running" ||
+    lifecycle === "game_finished"
+  );
 }
 
 function canStartGame(lifecycle: HostSnapshot["lifecycle"]): boolean {
@@ -832,7 +1125,7 @@ function sanitizeGamePlayer(player: HostPlayerSnapshot) {
   };
 }
 
-function sanitizePlayer(player: HostPlayerSnapshot): Record<string, unknown> {
+function sanitizePlayer(player: HostPlayerSnapshot): HostPlayerState {
   return {
     connected: player.connected,
     lastSeen: player.lastSeen,

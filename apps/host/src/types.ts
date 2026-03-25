@@ -1,4 +1,10 @@
-import type { GameManifest } from "@game-hub/sdk";
+import type {
+  GameManifest,
+  GameMatchStatus,
+  GameUiBadge,
+  GameUiOverlay,
+  SessionLeaderboardEntry,
+} from "@game-hub/sdk";
 
 export type HostLifecycle =
   | "idle"
@@ -27,19 +33,22 @@ export interface HostPlayerSnapshot {
   playerId: string;
   role: PlayerRole;
   team: PlayerTeam;
-  token: string | null;
 }
 
 export interface HostSnapshot {
+  gameState: Record<string, unknown> | null;
   joinUrl: string | null;
   lastRelayMessageAt: number | null;
+  leaderboard: SessionLeaderboardEntry[];
   lifecycle: HostLifecycle;
+  matchStatus: GameMatchStatus;
   moderatorId: string | null;
+  overlay: GameUiOverlay | null;
   players: HostPlayerSnapshot[];
-  pluginState: Record<string, unknown> | null;
   relayStatus: RelayConnectionStatus;
   selectedGame: string | null;
   sessionId: string | null;
+  statusBadges: GameUiBadge[];
   updatedAt: number;
 }
 
