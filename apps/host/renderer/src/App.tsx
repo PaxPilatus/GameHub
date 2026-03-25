@@ -583,9 +583,18 @@ function renderCentralView(params: RenderCentralViewParams) {
       gameState={snapshot.gameState}
       hubSession={hubSession}
       invokeHostAction={(action: string, payload?: InputValue) => {
+        if (windowKind === "central") {
+          console.warn("[host] central_plugin_action_ignored", {
+            action,
+            reason: "central_window_read_only",
+          });
+          return Promise.resolve();
+        }
+
         invokeHostAction(setFatalError, (hostApi) =>
           hostApi.sendPluginAction(action, payload),
         );
+        return Promise.resolve();
       }}
       phase={snapshot.lifecycle}
       players={players}
