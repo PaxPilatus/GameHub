@@ -1000,7 +1000,7 @@ describe("snake reducer", () => {
         secretQuestSettings: { enabled: true },
       },
       roundQuestAssignments: {
-        p1: createSecretQuestAssignment("p1", "wrap_4", {
+        p1: createSecretQuestAssignment("p1", "wrap_8", {
           completed: true,
         }),
       },
@@ -1028,8 +1028,9 @@ describe("snake reducer", () => {
       {
         bonusAwarded: true,
         completed: true,
+        failed: false,
         playerId: "p1",
-        questType: "wrap_4",
+        questType: "wrap_8",
       },
     ]);
   });
@@ -1390,7 +1391,7 @@ describe("snake reducer", () => {
     expect(state.publicState.coins).toHaveLength(0);
   });
 
-  it("does not count first_3_wave_coins progress during announcement phase", () => {
+  it("completes deaths_max_5_round at time-up when death limit is respected", () => {
     const context = createSnakeContext({ gridHeight: 16, gridWidth: 24, tickHz: 12 });
     let state = createRunningState(BASE_PLAYERS.slice(0, 2), context);
 
@@ -1429,27 +1430,19 @@ describe("snake reducer", () => {
 
     state = {
       ...state,
-      publicState: {
-        ...state.publicState,
-        coinrush: {
-          activeHotspots: [],
-          announcedHotspots: [{ x: 6, y: 4 }],
-          phase: "announce",
-          phaseTicksRemaining: 8,
-          wave: 3,
-        },
-        coins: [{ point: { x: 5, y: 4 }, type: "normal", value: 1 }],
-        roundMode: "coinrush",
-      },
-      roundModeFrozen: "coinrush",
       roundQuestAssignments: {
-        p1: createSecretQuestAssignment("p1", "first_3_wave_coins"),
+        p1: createSecretQuestAssignment("p1", "deaths_max_5_round", {
+          progress: {
+            deathCountTotal: 5,
+          },
+        }),
       },
       roundQuestMeta: {
         roundCounter: 1,
         waveFirstToThreeByWave: {},
       },
       roundSecretQuestEnabled: true,
+      roundTicksRemaining: 1,
     };
 
     state = reduceSnakeEngineState(
@@ -1462,9 +1455,83 @@ describe("snake reducer", () => {
     );
 
     const assignment = state.roundQuestAssignments.p1;
+    const alice = findSnake(state.publicState, "p1");
+    expect(state.publicState.stage).toBe("game_over");
+    expect(assignment?.completed).toBe(true);
+    expect(assignment?.failed).toBe(false);
+    expect(assignment?.bonusAwarded).toBe(true);
+    expect(alice.score).toBe(8);
+  });
+
+  it("fails deaths_max_5_round after the sixth death", () => {
+    const context = createSnakeContext({ gridHeight: 16, gridWidth: 24, tickHz: 12 });
+    let state = createRunningState(BASE_PLAYERS.slice(0, 2), context);
+
+    state = withRunningSnakes(state, [
+      createSnake({
+        alive: true,
+        connected: true,
+        direction: "right",
+        name: "Alice",
+        playerId: "p1",
+        score: 0,
+        segments: [
+          { x: 4, y: 4 },
+          { x: 5, y: 4 },
+          { x: 5, y: 5 },
+          { x: 4, y: 5 },
+        ],
+        team: "A",
+      }),
+      createSnake({
+        alive: true,
+        connected: true,
+        direction: "left",
+        name: "Bob",
+        playerId: "p2",
+        score: 0,
+        segments: [
+          { x: 18, y: 10 },
+          { x: 19, y: 10 },
+          { x: 20, y: 10 },
+          { x: 21, y: 10 },
+        ],
+        team: "B",
+      }),
+    ]);
+
+    state = {
+      ...state,
+      roundQuestAssignments: {
+        p1: createSecretQuestAssignment("p1", "deaths_max_5_round", {
+          progress: {
+            deathCountTotal: 5,
+          },
+        }),
+      },
+      roundQuestMeta: {
+        roundCounter: 1,
+        waveFirstToThreeByWave: {},
+      },
+      roundSecretQuestEnabled: true,
+      roundTicksRemaining: 100,
+    };
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players: BASE_PLAYERS.slice(0, 2),
+        type: "tick",
+      },
+      context,
+    );
+
+    const assignment = state.roundQuestAssignments.p1;
+    const alice = findSnake(state.publicState, "p1");
+    expect(assignment?.failed).toBe(true);
     expect(assignment?.completed).toBe(false);
-    expect(assignment?.progress.waveCoinCount).toBe(0);
-    expect(assignment?.progress.waveTarget).toBeNull();
+    expect(assignment?.bonusAwarded).toBe(false);
+    expect(alice.score).toBe(0);
   });
 
   it("assigns secret quests only to connected round participants", () => {
@@ -1503,6 +1570,45 @@ describe("snake reducer", () => {
     state = advanceToRunning(state, players, context);
 
     expect(Object.keys(state.roundQuestAssignments).sort()).toEqual(["p1", "p2"]);
+  });
+
+  it("uses player-count quest pools (2-3 low, 4-12 high)", () => {
+    const context = createSnakeContext({ tickHz: 12 });
+    const lowPool = ["deaths_max_5_round", "food_streak_6_no_death", "wrap_8"];
+    const highPool = ["kills_6", "drop_food_6", "survive_30s_no_item"];
+
+    const startWithSecretQuests = (players: GamePlayerSnapshot[]): SnakeEngineState => {
+      let state = createInitialSnakeEngineState(players, context);
+      state = reduceSnakeEngineState(
+        state,
+        {
+          enabled: true,
+          playerId: "host_local",
+          players,
+          type: "secret_quests_config_received",
+        },
+        context,
+      );
+      state = reduceSnakeEngineState(
+        state,
+        {
+          players,
+          type: "game_started",
+        },
+        context,
+      );
+      return advanceToRunning(state, players, context);
+    };
+
+    const lowState = startWithSecretQuests(BASE_PLAYERS.slice(0, 3));
+    const lowTypes = Object.values(lowState.roundQuestAssignments).map((assignment) => assignment.questType);
+    expect(lowTypes.length).toBe(3);
+    expect(lowTypes.every((questType) => lowPool.includes(questType))).toBe(true);
+
+    const highState = startWithSecretQuests(BASE_PLAYERS.slice(0, 4));
+    const highTypes = Object.values(highState.roundQuestAssignments).map((assignment) => assignment.questType);
+    expect(highTypes.length).toBe(4);
+    expect(highTypes.every((questType) => highPool.includes(questType))).toBe(true);
   });
 
 });
@@ -1603,36 +1709,27 @@ function createSecretQuestAssignment(
   overrides?: {
     bonusAwarded?: boolean;
     completed?: boolean;
+    failed?: boolean;
     progress?: Partial<SnakeEngineState["roundQuestAssignments"][string]["progress"]>;
   },
 ): SnakeEngineState["roundQuestAssignments"][string] {
   const baseProgress: SnakeEngineState["roundQuestAssignments"][string]["progress"] = {
-    boostWindowFoodCount: 0,
-    boostWindowTicksRemaining: 0,
-    dropFoodCollected: 0,
-    foodCollectedInWindow: 0,
-    foodCollectedSinceDeath: 0,
-    foodWindowTicksRemaining: 0,
+    deathCountTotal: 0,
+    dropFoodCount: 0,
+    foodStreak: 0,
     killCount: 0,
-    noItemSurvivalTicks: 0,
-    overtakeCount: 0,
-    overtakenOpponents: [],
-    waveCoinCount: 0,
-    waveTarget: null,
-    wraps: 0,
+    surviveNoItemTicks: 0,
+    wrapCount: 0,
   };
 
   return {
     bonusAwarded: overrides?.bonusAwarded ?? false,
     completed: overrides?.completed ?? false,
+    failed: overrides?.failed ?? false,
     playerId,
     progress: {
       ...baseProgress,
       ...(overrides?.progress ?? {}),
-      overtakenOpponents:
-        overrides?.progress?.overtakenOpponents !== undefined
-          ? [...overrides.progress.overtakenOpponents]
-          : baseProgress.overtakenOpponents,
     },
     questType,
   };
@@ -1645,4 +1742,5 @@ function findSnake(state: SnakeState, playerId: string): SnakePlayerState {
   }
   return snake;
 }
+
 

@@ -31,6 +31,7 @@ import {
   type SnakePlayerState,
   type SnakePoint,
   type SnakeRoundMode,
+  type SnakeSecretQuestLiveEntry,
   type SnakeSecretQuestRoundSummaryEntry,
   type SnakeSecretQuestSettings,
   type SnakeState,
@@ -71,6 +72,28 @@ const DEFAULT_SECRET_QUEST_SETTINGS: SnakeSecretQuestSettings = {
   enabled: false,
 };
 
+const SNAKE_ITEM_SPRITE_URLS: Record<SnakeItem["type"], string> = {
+  boost: new URL("../assets/Speed.png", import.meta.url).href,
+  magnet: new URL("../assets/Magnet.png", import.meta.url).href,
+  shield: new URL("../assets/Schild.png", import.meta.url).href,
+};
+
+const SNAKE_COIN_SPRITE_URLS: Record<SnakeCoin["type"], string> = {
+  gold: new URL("../assets/big Coin.png", import.meta.url).href,
+  normal: new URL("../assets/normal Coin.png", import.meta.url).href,
+};
+
+type SnakeSpriteStatus = "loading" | "ready" | "error";
+
+interface SnakeSpriteCacheEntry {
+  image: HTMLImageElement;
+  status: SnakeSpriteStatus;
+}
+
+type SnakeSpriteLoadListener = () => void;
+
+const snakeSpriteCache = new Map<string, SnakeSpriteCacheEntry>();
+const snakeSpriteLoadListeners = new Set<SnakeSpriteLoadListener>();
 const snakeContext = createSnakeContext({
   tickHz: SNAKE_DEFAULT_TICK_HZ,
 });
@@ -93,6 +116,10 @@ function SnakeMobileView(props: GameMobileProps<SnakeState>) {
   const isCoinrush = state?.roundMode === "coinrush";
   const scoreLabel = isCoinrush ? "Coins" : "Score";
   const scoreValue = isCoinrush ? (playerSnake?.coinCount ?? 0) : (playerSnake?.score ?? 0);
+  const playerQuest =
+    props.playerId === null || state === null || state.secretQuestLive === null
+      ? null
+      : state.secretQuestLive.find((entry) => entry.playerId === props.playerId) ?? null;
 
   return (
     <div className="plugin-stack snake-mobile-stack">
@@ -132,6 +159,18 @@ function SnakeMobileView(props: GameMobileProps<SnakeState>) {
             ))}
           {effects.length === 0 ? <span>No active item effects.</span> : null}
         </div>
+      </div>
+
+      <div className="snake-mobile-board-copy snake-mobile-quest-card">
+        <strong>Secret Quest</strong>
+        <span>{resolveSnakeMobileQuestMessage(state, props.playerId, playerQuest)}</span>
+        {state?.stage === "running" && playerQuest !== null ? (
+          <div className="snake-mobile-effects">
+            <span>{resolveSnakeSecretQuestLabel(playerQuest.questType)}</span>
+            <span>{formatSnakeSecretQuestProgress(playerQuest, state.tickHz)}</span>
+            <span>Status {playerQuest.status}</span>
+          </div>
+        ) : null}
       </div>
 
       <div className="snake-dpad" role="group" aria-label="Snake direction pad">
@@ -196,6 +235,7 @@ function SnakeCentralView(props: GameCentralProps<SnakeState>) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const state = asSnakeState(props.gameState);
+  const [spriteVersion, setSpriteVersion] = useState(0);
   const [canvasSize, setCanvasSize] = useState<SnakeCanvasSize>({
     height: snakeContext.gridHeight * 18,
     width: snakeContext.gridWidth * 18,
@@ -208,6 +248,13 @@ function SnakeCentralView(props: GameCentralProps<SnakeState>) {
   const roundMode = state?.roundMode ?? "standard";
   const secretQuestSettings = state?.secretQuestSettings ?? DEFAULT_SECRET_QUEST_SETTINGS;
   const countdownOverlayText = resolveSnakeCountdownOverlayText(state);
+
+  useEffect(() => {
+    preloadSnakeSprites();
+    return subscribeSnakeSpriteLoads(() => {
+      setSpriteVersion((current) => current + 1);
+    });
+  }, []);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -311,7 +358,7 @@ function SnakeCentralView(props: GameCentralProps<SnakeState>) {
     drawCoins(context, state.coins, cellWidth, cellHeight, inset);
     drawItems(context, state.items, cellWidth, cellHeight, inset);
     drawSnakes(context, state, cellWidth, cellHeight, inset);
-  }, [canvasSize.height, canvasSize.width, state]);
+  }, [canvasSize.height, canvasSize.width, spriteVersion, state]);
 
   return (
     <div className="snake-central-stage">
@@ -400,6 +447,7 @@ function SnakeCentralView(props: GameCentralProps<SnakeState>) {
               ? "Secret quests editable in lobby/countdown"
               : `Round-frozen secret quests: ${secretQuestSettings.enabled ? "on" : "off"}`}
           </span>
+          <span className="snake-item-toggle-hint">{resolveSnakeCentralSecretQuestHint(state)}</span>
           <span className="snake-item-toggle-hint">Icons: bolt boost / U magnet / S shield</span>
           <span className="snake-item-toggle-hint">Collectibles: coin 1 / gold 3 / hotspot H (zone only)</span>
         </div>
@@ -601,6 +649,20 @@ function drawCoins(
   for (const coin of coins) {
     const centerX = coin.point.x * cellWidth + cellWidth / 2;
     const centerY = coin.point.y * cellHeight + cellHeight / 2;
+    const sprite = getSnakeSprite(resolveCoinSpriteUrl(coin.type));
+    if (sprite !== null) {
+      const diameter = Math.max(1, Math.min(cellWidth, cellHeight) * (coin.type === "gold" ? 0.9 : 0.82));
+      drawSpriteInsideTile(
+        context,
+        sprite,
+        centerX - diameter / 2,
+        centerY - diameter / 2,
+        diameter,
+        diameter,
+      );
+      continue;
+    }
+
     const radius = coin.type === "gold"
       ? Math.max(1, Math.min(cellWidth, cellHeight) * 0.33)
       : Math.max(1, Math.min(cellWidth, cellHeight) * 0.26);
@@ -721,6 +783,25 @@ function drawItems(
     const centerX = tileLeft + tileWidth / 2;
     const centerY = tileTop + tileHeight / 2;
     const glyphSize = Math.max(6, Math.min(tileWidth, tileHeight));
+    const sprite = getSnakeSprite(resolveItemSpriteUrl(item.type));
+
+    if (sprite !== null) {
+      context.fillStyle = withAlpha(resolveItemColor(item.type), 0.2);
+      context.fillRect(tileLeft, tileTop, tileWidth, tileHeight);
+      context.strokeStyle = "rgba(255, 255, 255, 0.3)";
+      context.lineWidth = Math.max(1, inset * 0.45);
+      context.strokeRect(tileLeft, tileTop, tileWidth, tileHeight);
+      drawSpriteInsideTile(
+        context,
+        sprite,
+        tileLeft,
+        tileTop,
+        tileWidth,
+        tileHeight,
+        Math.max(1, Math.min(tileWidth, tileHeight) * 0.06),
+      );
+      continue;
+    }
 
     context.fillStyle = resolveItemColor(item.type);
     context.fillRect(tileLeft, tileTop, tileWidth, tileHeight);
@@ -878,6 +959,181 @@ function drawSnakeIdentityLabel(
   context.restore();
 }
 
+function resolveItemSpriteUrl(type: SnakeItem["type"]): string {
+  return SNAKE_ITEM_SPRITE_URLS[type];
+}
+
+function resolveCoinSpriteUrl(type: SnakeCoin["type"]): string {
+  return SNAKE_COIN_SPRITE_URLS[type];
+}
+
+function drawSpriteInsideTile(
+  context: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  padding = 0,
+): void {
+  const paddedLeft = left + padding;
+  const paddedTop = top + padding;
+  const paddedWidth = Math.max(1, width - padding * 2);
+  const paddedHeight = Math.max(1, height - padding * 2);
+
+  context.drawImage(image, paddedLeft, paddedTop, paddedWidth, paddedHeight);
+}
+
+function preloadSnakeSprites(): void {
+  for (const url of Object.values(SNAKE_ITEM_SPRITE_URLS)) {
+    void getSnakeSprite(url);
+  }
+  for (const url of Object.values(SNAKE_COIN_SPRITE_URLS)) {
+    void getSnakeSprite(url);
+  }
+}
+
+function subscribeSnakeSpriteLoads(listener: SnakeSpriteLoadListener): () => void {
+  snakeSpriteLoadListeners.add(listener);
+  return () => {
+    snakeSpriteLoadListeners.delete(listener);
+  };
+}
+
+function notifySnakeSpriteLoads(): void {
+  for (const listener of snakeSpriteLoadListeners) {
+    listener();
+  }
+}
+
+function getSnakeSprite(url: string): HTMLImageElement | null {
+  if (typeof Image === "undefined") {
+    return null;
+  }
+
+  const cached = snakeSpriteCache.get(url);
+  if (cached !== undefined) {
+    return cached.status === "ready" ? cached.image : null;
+  }
+
+  const image = new Image();
+  const entry: SnakeSpriteCacheEntry = {
+    image,
+    status: "loading",
+  };
+  snakeSpriteCache.set(url, entry);
+
+  image.onload = () => {
+    const current = snakeSpriteCache.get(url);
+    if (current === undefined) {
+      return;
+    }
+    current.status = "ready";
+    notifySnakeSpriteLoads();
+  };
+  image.onerror = () => {
+    const current = snakeSpriteCache.get(url);
+    if (current === undefined) {
+      return;
+    }
+    current.status = "error";
+    notifySnakeSpriteLoads();
+  };
+  image.src = url;
+
+  return null;
+}
+
+function resolveSnakeMobileQuestMessage(
+  state: SnakeState | null,
+  playerId: string | null,
+  quest: SnakeSecretQuestLiveEntry | null,
+): string {
+  if (state === null) {
+    return "Quest status unavailable.";
+  }
+
+  if (!state.secretQuestSettings.enabled) {
+    return "Secret quests are off.";
+  }
+
+  if (state.stage === "lobby" || state.stage === "countdown") {
+    return "Secret quests enabled. Your quest appears at round start.";
+  }
+
+  if (state.stage !== "running") {
+    return "Quest results are shown after the round.";
+  }
+
+  if (playerId === null) {
+    return "Join as a player to receive a secret quest.";
+  }
+
+  if (quest === null) {
+    return "No quest assigned for this player this round.";
+  }
+
+  return resolveSnakeSecretQuestLabel(quest.questType);
+}
+
+function formatSnakeSecretQuestProgress(entry: SnakeSecretQuestLiveEntry, tickHz: number): string {
+  if (entry.questType === "survive_30s_no_item") {
+    const divisor = Math.max(1, tickHz);
+    const currentSeconds = (entry.progressCurrent / divisor).toFixed(1);
+    const targetSeconds = (entry.progressTarget / divisor).toFixed(1);
+    return `${currentSeconds}s / ${targetSeconds}s`;
+  }
+
+  return `${entry.progressCurrent}/${entry.progressTarget}`;
+}
+
+function resolveSnakeSecretQuestLabel(type: SnakeSecretQuestLiveEntry["questType"]): string {
+  switch (type) {
+    case "deaths_max_5_round":
+      return "Die at most 5 times this round.";
+    case "food_streak_6_no_death":
+      return "Eat 6 food in a row without dying.";
+    case "kills_6":
+      return "Score 6 kills.";
+    case "drop_food_6":
+      return "Collect 6 drop-food.";
+    case "wrap_8":
+      return "Wrap across the border 8 times.";
+    case "survive_30s_no_item":
+      return "Survive 30s without item pickups.";
+    default:
+      return "Complete your secret quest.";
+  }
+}
+
+function resolveSnakeCentralSecretQuestHint(state: SnakeState | null): string {
+  if (state === null || !state.secretQuestSettings.enabled) {
+    return "Secret quests off.";
+  }
+
+  if (state.stage === "lobby" || state.stage === "countdown") {
+    return "Secret quests enabled. Assignment happens at round start.";
+  }
+
+  if (state.stage === "running") {
+    const live = state.secretQuestLive ?? [];
+    if (live.length === 0) {
+      return "Secret quests active: no assignments.";
+    }
+    const completed = live.filter((entry) => entry.status === "completed").length;
+    const failed = live.filter((entry) => entry.status === "failed").length;
+    return `Secret quests active: ${completed}/${live.length} completed, ${failed} failed.`;
+  }
+
+  const summary = state.secretQuestRoundSummary ?? [];
+  if (summary.length === 0) {
+    return "Secret quests active this round.";
+  }
+
+  const completed = summary.filter((entry) => entry.completed).length;
+  const failed = summary.filter((entry) => entry.failed).length;
+  return `Secret quest summary: ${completed}/${summary.length} completed, ${failed} failed.`;
+}
 function resolveSnakeCountdownOverlayText(state: SnakeState | null): string | null {
   if (state === null) {
     return null;
@@ -1505,10 +1761,14 @@ function asSnakeState(value: unknown): SnakeState | null {
     ? value.secretQuestSettings
     : DEFAULT_SECRET_QUEST_SETTINGS;
   const secretQuestRoundSummary = Array.isArray(value.secretQuestRoundSummary)
-    ? value.secretQuestRoundSummary.filter(
-        (entry): entry is SnakeSecretQuestRoundSummaryEntry =>
-          isSnakeSecretQuestRoundSummaryEntry(entry),
-      )
+    ? value.secretQuestRoundSummary
+        .map((entry) => parseSnakeSecretQuestRoundSummaryEntry(entry))
+        .filter((entry): entry is SnakeSecretQuestRoundSummaryEntry => entry !== null)
+    : null;
+  const secretQuestLive = Array.isArray(value.secretQuestLive)
+    ? value.secretQuestLive
+        .map((entry) => parseSnakeSecretQuestLiveEntry(entry))
+        .filter((entry): entry is SnakeSecretQuestLiveEntry => entry !== null)
     : null;
   const coinrush = isSnakeCoinrushState(value.coinrush) ? value.coinrush : null;
 
@@ -1525,6 +1785,7 @@ function asSnakeState(value: unknown): SnakeState | null {
     itemSettings,
     items,
     latestMessage: typeof value.latestMessage === "string" ? value.latestMessage : "",
+    secretQuestLive,
     secretQuestRoundSummary,
     secretQuestSettings,
     roundMode,
@@ -1640,23 +1901,59 @@ function isSnakeSecretQuestSettings(value: unknown): value is SnakeSecretQuestSe
   return isRecord(value) && typeof value.enabled === "boolean";
 }
 
-function isSnakeSecretQuestRoundSummaryEntry(
+function parseSnakeSecretQuestRoundSummaryEntry(
   value: unknown,
-): value is SnakeSecretQuestRoundSummaryEntry {
+): SnakeSecretQuestRoundSummaryEntry | null {
+  if (
+    !isRecord(value) ||
+    typeof value.playerId !== "string" ||
+    typeof value.completed !== "boolean" ||
+    typeof value.bonusAwarded !== "boolean" ||
+    !isSnakeSecretQuestType(value.questType)
+  ) {
+    return null;
+  }
+
+  return {
+    bonusAwarded: value.bonusAwarded,
+    completed: value.completed,
+    failed: typeof value.failed === "boolean" ? value.failed : false,
+    playerId: value.playerId,
+    questType: value.questType,
+  };
+}
+
+function parseSnakeSecretQuestLiveEntry(value: unknown): SnakeSecretQuestLiveEntry | null {
+  if (!isRecord(value) || typeof value.playerId !== "string" || !isSnakeSecretQuestType(value.questType)) {
+    return null;
+  }
+
+  const status = readSnakeSecretQuestLiveStatus(value.status);
+
+  return {
+    playerId: value.playerId,
+    progressCurrent: typeof value.progressCurrent === "number" ? value.progressCurrent : 0,
+    progressTarget: typeof value.progressTarget === "number" ? value.progressTarget : 0,
+    questType: value.questType,
+    status,
+  };
+}
+
+function readSnakeSecretQuestLiveStatus(value: unknown): SnakeSecretQuestLiveEntry["status"] {
+  if (value === "completed" || value === "failed") {
+    return value;
+  }
+  return "active";
+}
+
+function isSnakeSecretQuestType(value: unknown): value is SnakeSecretQuestLiveEntry["questType"] {
   return (
-    isRecord(value) &&
-    typeof value.playerId === "string" &&
-    typeof value.completed === "boolean" &&
-    typeof value.bonusAwarded === "boolean" &&
-    (value.questType === "food_8_in_15s" ||
-      value.questType === "wrap_4" ||
-      value.questType === "drop_food_6" ||
-      value.questType === "survive_20s_no_item" ||
-      value.questType === "kill_1" ||
-      value.questType === "food_10_no_death" ||
-      value.questType === "first_3_wave_coins" ||
-      value.questType === "overtake_2_players_score" ||
-      value.questType === "boost_then_food_5_in_5s")
+    value === "deaths_max_5_round" ||
+    value === "food_streak_6_no_death" ||
+    value === "kills_6" ||
+    value === "drop_food_6" ||
+    value === "wrap_8" ||
+    value === "survive_30s_no_item"
   );
 }
 

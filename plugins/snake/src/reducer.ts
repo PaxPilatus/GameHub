@@ -43,30 +43,23 @@ const SNAKE_COIN_NORMAL_VALUE = 1;
 const SNAKE_COIN_GOLD_VALUE = 3;
 
 const SNAKE_SECRET_QUEST_BONUS_POINTS = 8;
-const SNAKE_SECRET_QUEST_FOOD_8_WINDOW_SECONDS = 15;
-const SNAKE_SECRET_QUEST_SURVIVE_NO_ITEM_SECONDS = 20;
-const SNAKE_SECRET_QUEST_BOOST_FOOD_WINDOW_SECONDS = 5;
-const SNAKE_SECRET_QUEST_FOOD_8_TARGET = 8;
-const SNAKE_SECRET_QUEST_WRAP_TARGET = 4;
+const SNAKE_SECRET_QUEST_DEATHS_MAX = 5;
+const SNAKE_SECRET_QUEST_FOOD_STREAK_TARGET = 6;
+const SNAKE_SECRET_QUEST_KILLS_TARGET = 6;
 const SNAKE_SECRET_QUEST_DROP_FOOD_TARGET = 6;
-const SNAKE_SECRET_QUEST_FOOD_10_TARGET = 10;
-const SNAKE_SECRET_QUEST_FIRST_WAVE_COINS_TARGET = 3;
-const SNAKE_SECRET_QUEST_OVERTAKE_TARGET = 2;
-const SNAKE_SECRET_QUEST_BOOST_FOOD_TARGET = 5;
+const SNAKE_SECRET_QUEST_WRAP_TARGET = 8;
+const SNAKE_SECRET_QUEST_SURVIVE_NO_ITEM_SECONDS = 30;
 
 const SNAKE_SECRET_QUEST_POOL_LOW: SnakeSecretQuestType[] = [
-  "food_8_in_15s",
-  "wrap_4",
-  "drop_food_6",
-  "survive_20s_no_item",
+  "deaths_max_5_round",
+  "food_streak_6_no_death",
+  "wrap_8",
 ];
 
 const SNAKE_SECRET_QUEST_POOL_HIGH: SnakeSecretQuestType[] = [
-  "kill_1",
-  "food_10_no_death",
-  "first_3_wave_coins",
-  "overtake_2_players_score",
-  "boost_then_food_5_in_5s",
+  "kills_6",
+  "drop_food_6",
+  "survive_30s_no_item",
 ];
 
 const SNAKE_COLORS = [
@@ -120,15 +113,12 @@ export type SnakeRoundMode = "standard" | "coinrush";
 export type SnakeCoinType = "normal" | "gold";
 export type SnakeCoinrushPhase = "announce" | "active";
 export type SnakeSecretQuestType =
-  | "food_8_in_15s"
-  | "wrap_4"
+  | "deaths_max_5_round"
+  | "food_streak_6_no_death"
+  | "kills_6"
   | "drop_food_6"
-  | "survive_20s_no_item"
-  | "kill_1"
-  | "food_10_no_death"
-  | "first_3_wave_coins"
-  | "overtake_2_players_score"
-  | "boost_then_food_5_in_5s";
+  | "wrap_8"
+  | "survive_30s_no_item";
 
 export interface SnakePoint {
   x: number;
@@ -169,37 +159,41 @@ export interface SnakeSecretQuestSettings {
   enabled: boolean;
 }
 
+export type SnakeSecretQuestLiveStatus = "active" | "completed" | "failed";
+
 export interface SnakeSecretQuestRoundSummaryEntry {
   bonusAwarded: boolean;
   completed: boolean;
+  failed: boolean;
   playerId: string;
   questType: SnakeSecretQuestType;
 }
 
+export interface SnakeSecretQuestLiveEntry {
+  playerId: string;
+  progressCurrent: number;
+  progressTarget: number;
+  questType: SnakeSecretQuestType;
+  status: SnakeSecretQuestLiveStatus;
+}
+
 interface SnakeSecretQuestProgressInternal {
-  boostWindowFoodCount: number;
-  boostWindowTicksRemaining: number;
-  dropFoodCollected: number;
-  foodCollectedInWindow: number;
-  foodCollectedSinceDeath: number;
-  foodWindowTicksRemaining: number;
+  deathCountTotal: number;
+  dropFoodCount: number;
+  foodStreak: number;
   killCount: number;
-  noItemSurvivalTicks: number;
-  overtakeCount: number;
-  overtakenOpponents: string[];
-  waveCoinCount: number;
-  waveTarget: number | null;
-  wraps: number;
+  surviveNoItemTicks: number;
+  wrapCount: number;
 }
 
 interface SnakeSecretQuestAssignmentInternal {
   bonusAwarded: boolean;
   completed: boolean;
+  failed: boolean;
   playerId: string;
   progress: SnakeSecretQuestProgressInternal;
   questType: SnakeSecretQuestType;
 }
-
 interface SnakeSecretQuestMetaInternal {
   roundCounter: number;
   waveFirstToThreeByWave: Record<number, string>;
@@ -271,6 +265,7 @@ export interface SnakeState extends Record<string, unknown> {
   itemSettings: SnakeItemSettings;
   items: SnakeItem[];
   latestMessage: string;
+  secretQuestLive: SnakeSecretQuestLiveEntry[] | null;
   secretQuestRoundSummary: SnakeSecretQuestRoundSummaryEntry[] | null;
   secretQuestSettings: SnakeSecretQuestSettings;
   roundMode: SnakeRoundMode;
@@ -471,6 +466,7 @@ export function createInitialSnakeEngineState(
       itemSettings,
       items: [],
       latestMessage: buildLobbyMessage(players),
+      secretQuestLive: null,
       secretQuestRoundSummary: null,
       secretQuestSettings,
       roundMode: "standard",
@@ -616,10 +612,13 @@ function beginRunning(state: SnakeEngineState, context: SnakeContext): SnakeEngi
       ? createCoinrushAnnouncementState(roundContext, 1, context.tickHz)
       : null;
   const roundQuestAssignments = roundSecretQuestEnabled
-    ? assignSecretQuestsForRound(snakes, roundModeFrozen, roundItemSettings, nextRoundCounter, context.tickHz)
+    ? assignSecretQuestsForRound(snakes, roundModeFrozen, roundItemSettings, nextRoundCounter)
     : {};
   const effectiveRoundSecretQuestEnabled =
     roundSecretQuestEnabled && Object.keys(roundQuestAssignments).length > 0;
+  const secretQuestLive = effectiveRoundSecretQuestEnabled
+    ? buildSecretQuestLive(roundQuestAssignments, context.tickHz)
+    : null;
 
   return {
     ...state,
@@ -640,6 +639,7 @@ function beginRunning(state: SnakeEngineState, context: SnakeContext): SnakeEngi
       items: initialItems.items,
       latestMessage: buildRunningMessage(aliveCount, roundSeconds, roundModeFrozen, snakes),
       roundSecondsRemaining: roundSeconds,
+      secretQuestLive,
       secretQuestRoundSummary: null,
       showIdentityLabels: false,
       snakes,
@@ -872,6 +872,7 @@ function advanceRunningTick(state: SnakeEngineState, context: SnakeContext): Sna
       items,
       latestMessage: buildRunningMessage(aliveCount, nextRoundSeconds, state.roundModeFrozen, snakes),
       roundSecondsRemaining: nextRoundSeconds,
+      secretQuestLive: state.roundSecretQuestEnabled ? buildSecretQuestLive(roundQuestAssignments, context.tickHz) : null,
       secretQuestRoundSummary: null,
       snakes,
       tick: nextTick,
@@ -889,11 +890,18 @@ function advanceRunningTick(state: SnakeEngineState, context: SnakeContext): Sna
 }
 
 function finalizeRoundByTime(state: SnakeEngineState): SnakeEngineState {
+  const finalizedQuests = state.roundSecretQuestEnabled
+    ? finalizeRoundEndSecretQuests(state.roundQuestAssignments, state.publicState.snakes)
+    : {
+        assignments: cloneSecretQuestAssignments(state.roundQuestAssignments),
+        snakes: state.publicState.snakes.map((snake) => cloneSnake(snake)),
+      };
+
   const resolved =
     state.roundModeFrozen === "coinrush"
-      ? resolveWinnerByCoins(state.publicState.snakes)
-      : resolveWinnerByScore(state.publicState.snakes);
-  const snakes = state.publicState.snakes.map((snake) => {
+      ? resolveWinnerByCoins(finalizedQuests.snakes)
+      : resolveWinnerByScore(finalizedQuests.snakes);
+  const snakes = finalizedQuests.snakes.map((snake) => {
     if (resolved.winner?.playerId === snake.playerId) {
       return {
         ...snake,
@@ -904,7 +912,7 @@ function finalizeRoundByTime(state: SnakeEngineState): SnakeEngineState {
     return snake;
   });
   const aliveCount = countAlive(snakes);
-  const secretQuestRoundSummary = buildSecretQuestRoundSummary(state.roundQuestAssignments);
+  const secretQuestRoundSummary = buildSecretQuestRoundSummary(finalizedQuests.assignments);
   const latestMessage =
     state.roundModeFrozen === "coinrush"
       ? resolved.winner === null
@@ -925,6 +933,7 @@ function finalizeRoundByTime(state: SnakeEngineState): SnakeEngineState {
       countdownRemaining: null,
       latestMessage,
       roundSecondsRemaining: 0,
+      secretQuestLive: null,
       secretQuestRoundSummary,
       showIdentityLabels: false,
       snakes,
@@ -932,6 +941,7 @@ function finalizeRoundByTime(state: SnakeEngineState): SnakeEngineState {
       winnerPlayerId: resolved.winner?.playerId ?? null,
       winnerTeam: resolved.winner?.team ?? null,
     },
+    roundQuestAssignments: finalizedQuests.assignments,
     roundTicksRemaining: 0,
   };
 }
@@ -2634,6 +2644,7 @@ function startRound(
       items: [],
       latestMessage: `Round starts in ${countdownRemaining}...`,
       roundSecondsRemaining: null,
+      secretQuestLive: null,
       secretQuestRoundSummary: null,
       showIdentityLabels: true,
       snakes: spawnedSnakes,
@@ -2733,6 +2744,7 @@ function stopRound(
       items: [],
       latestMessage: "Round stopped by host.",
       roundSecondsRemaining: null,
+      secretQuestLive: null,
       secretQuestRoundSummary: null,
       showIdentityLabels: true,
       snakes: lobbySnakes,
@@ -2777,6 +2789,7 @@ function syncPlayers(
           width: lobbyContext.gridWidth,
         },
         latestMessage: buildLobbyMessage(players),
+        secretQuestLive: null,
         secretQuestRoundSummary: null,
         showIdentityLabels: true,
         snakes,
@@ -3139,25 +3152,15 @@ function cloneSecretQuestMeta(meta: SnakeSecretQuestMetaInternal): SnakeSecretQu
     waveFirstToThreeByWave: { ...meta.waveFirstToThreeByWave },
   };
 }
-function createDefaultSecretQuestProgress(
-  questType: SnakeSecretQuestType,
-  tickHz: number,
-): SnakeSecretQuestProgressInternal {
+
+function createDefaultSecretQuestProgress(): SnakeSecretQuestProgressInternal {
   return {
-    boostWindowFoodCount: 0,
-    boostWindowTicksRemaining: 0,
-    dropFoodCollected: 0,
-    foodCollectedInWindow: 0,
-    foodCollectedSinceDeath: 0,
-    foodWindowTicksRemaining:
-      questType === "food_8_in_15s" ? toTicks(SNAKE_SECRET_QUEST_FOOD_8_WINDOW_SECONDS, tickHz) : 0,
+    deathCountTotal: 0,
+    dropFoodCount: 0,
+    foodStreak: 0,
     killCount: 0,
-    noItemSurvivalTicks: 0,
-    overtakeCount: 0,
-    overtakenOpponents: [],
-    waveCoinCount: 0,
-    waveTarget: null,
-    wraps: 0,
+    surviveNoItemTicks: 0,
+    wrapCount: 0,
   };
 }
 
@@ -3171,7 +3174,6 @@ function cloneSecretQuestAssignments(
         ...assignment,
         progress: {
           ...assignment.progress,
-          overtakenOpponents: [...assignment.progress.overtakenOpponents],
         },
       },
     ]),
@@ -3183,18 +3185,10 @@ function resolveSecretQuestPool(connectedPlayers: number): SnakeSecretQuestType[
 }
 
 function isSecretQuestEligible(
-  questType: SnakeSecretQuestType,
-  roundMode: SnakeRoundMode,
-  itemSettings: SnakeItemSettings,
+  _questType: SnakeSecretQuestType,
+  _roundMode: SnakeRoundMode,
+  _itemSettings: SnakeItemSettings,
 ): boolean {
-  if (questType === "first_3_wave_coins" && roundMode !== "coinrush") {
-    return false;
-  }
-
-  if (questType === "boost_then_food_5_in_5s" && !itemSettings.boost) {
-    return false;
-  }
-
   return true;
 }
 
@@ -3203,7 +3197,6 @@ function assignSecretQuestsForRound(
   roundMode: SnakeRoundMode,
   itemSettings: SnakeItemSettings,
   roundCounter: number,
-  tickHz: number,
 ): Record<string, SnakeSecretQuestAssignmentInternal> {
   const connectedPlayers = snakes.filter((snake) => snake.connected).length;
   const pool = resolveSecretQuestPool(connectedPlayers).filter((questType) =>
@@ -3221,14 +3214,15 @@ function assignSecretQuestsForRound(
 
   return Object.fromEntries(
     orderedPlayerIds.map((playerId, index) => {
-      const questType = pool[normalizeIndex(rotation + index, pool.length)] ?? pool[0] ?? "wrap_4";
+      const questType = pool[normalizeIndex(rotation + index, pool.length)] ?? pool[0] ?? "wrap_8";
       return [
         playerId,
         {
           bonusAwarded: false,
           completed: false,
+          failed: false,
           playerId,
-          progress: createDefaultSecretQuestProgress(questType, tickHz),
+          progress: createDefaultSecretQuestProgress(),
           questType,
         },
       ];
@@ -3405,163 +3399,77 @@ function advanceSecretQuests(
     const signal = ensureQuestSignal(frame, playerId);
     const progress = {
       ...assignment.progress,
-      overtakenOpponents: [...assignment.progress.overtakenOpponents],
     };
 
-    switch (assignment.questType) {
-      case "food_8_in_15s": {
-        if (!assignment.completed && progress.foodWindowTicksRemaining > 0) {
+    if (!assignment.completed && !assignment.failed) {
+      switch (assignment.questType) {
+        case "deaths_max_5_round": {
           if (signal.connected) {
-            progress.foodCollectedInWindow += signal.foodCollected;
+            progress.deathCountTotal += signal.deathCount;
           }
-          if (progress.foodCollectedInWindow >= SNAKE_SECRET_QUEST_FOOD_8_TARGET) {
+          if (progress.deathCountTotal > SNAKE_SECRET_QUEST_DEATHS_MAX) {
+            assignment.failed = true;
+          }
+          break;
+        }
+        case "food_streak_6_no_death": {
+          if (signal.deathCount > 0) {
+            progress.foodStreak = 0;
+          }
+          if (signal.connected) {
+            progress.foodStreak += signal.foodCollected;
+          }
+          if (progress.foodStreak >= SNAKE_SECRET_QUEST_FOOD_STREAK_TARGET) {
             assignment.completed = true;
           }
-          progress.foodWindowTicksRemaining = Math.max(0, progress.foodWindowTicksRemaining - 1);
+          break;
         }
-        break;
-      }
-      case "wrap_4": {
-        if (!assignment.completed && signal.connected) {
-          progress.wraps += signal.wraps;
-          if (progress.wraps >= SNAKE_SECRET_QUEST_WRAP_TARGET) {
+        case "kills_6": {
+          if (signal.connected) {
+            progress.killCount += signal.killCount;
+          }
+          if (progress.killCount >= SNAKE_SECRET_QUEST_KILLS_TARGET) {
             assignment.completed = true;
           }
+          break;
         }
-        break;
-      }
-      case "drop_food_6": {
-        if (!assignment.completed && signal.connected) {
-          progress.dropFoodCollected += signal.dropFoodCollected;
-          if (progress.dropFoodCollected >= SNAKE_SECRET_QUEST_DROP_FOOD_TARGET) {
+        case "drop_food_6": {
+          if (signal.connected) {
+            progress.dropFoodCount += signal.dropFoodCollected;
+          }
+          if (progress.dropFoodCount >= SNAKE_SECRET_QUEST_DROP_FOOD_TARGET) {
             assignment.completed = true;
           }
+          break;
         }
-        break;
-      }
-      case "survive_20s_no_item": {
-        if (!assignment.completed) {
+        case "wrap_8": {
+          if (signal.connected) {
+            progress.wrapCount += signal.wraps;
+          }
+          if (progress.wrapCount >= SNAKE_SECRET_QUEST_WRAP_TARGET) {
+            assignment.completed = true;
+          }
+          break;
+        }
+        case "survive_30s_no_item": {
           const resetStreak =
             !signal.connected || !signal.alive || signal.deathCount > 0 || signal.itemCollected > 0;
-          progress.noItemSurvivalTicks = resetStreak ? 0 : progress.noItemSurvivalTicks + 1;
+          progress.surviveNoItemTicks = resetStreak ? 0 : progress.surviveNoItemTicks + 1;
           if (
-            progress.noItemSurvivalTicks >=
+            progress.surviveNoItemTicks >=
             toTicks(SNAKE_SECRET_QUEST_SURVIVE_NO_ITEM_SECONDS, tickHz)
           ) {
             assignment.completed = true;
           }
+          break;
         }
-        break;
+        default:
+          break;
       }
-      case "kill_1": {
-        if (!assignment.completed && signal.connected) {
-          progress.killCount += signal.killCount;
-          if (progress.killCount >= 1) {
-            assignment.completed = true;
-          }
-        }
-        break;
-      }
-      case "food_10_no_death": {
-        if (!assignment.completed) {
-          if (signal.deathCount > 0) {
-            progress.foodCollectedSinceDeath = 0;
-          }
-          if (signal.connected) {
-            progress.foodCollectedSinceDeath += signal.foodCollected;
-          }
-          if (progress.foodCollectedSinceDeath >= SNAKE_SECRET_QUEST_FOOD_10_TARGET) {
-            assignment.completed = true;
-          }
-        }
-        break;
-      }
-      case "first_3_wave_coins": {
-        if (!assignment.completed && signal.connected && signal.wave !== null) {
-          if (progress.waveTarget !== signal.wave) {
-            progress.waveTarget = signal.wave;
-            progress.waveCoinCount = 0;
-          }
-          progress.waveCoinCount += signal.coinCollected;
-          if (progress.waveCoinCount >= SNAKE_SECRET_QUEST_FIRST_WAVE_COINS_TARGET) {
-            const currentWinner = nextMeta.waveFirstToThreeByWave[signal.wave];
-            if (currentWinner === undefined) {
-              nextMeta.waveFirstToThreeByWave[signal.wave] = playerId;
-            }
-            if (nextMeta.waveFirstToThreeByWave[signal.wave] === playerId) {
-              assignment.completed = true;
-            }
-          }
-        }
-        break;
-      }
-      case "overtake_2_players_score": {
-        if (!assignment.completed && signal.connected) {
-          const overtaken = new Set(progress.overtakenOpponents);
-          for (const opponentId of frame.playerOrder) {
-            if (opponentId === playerId || overtaken.has(opponentId)) {
-              continue;
-            }
-            const opponentSignal = frame.byPlayerId[opponentId];
-            if (opponentSignal === undefined) {
-              continue;
-            }
-            const wasBehind = signal.scoreBefore < opponentSignal.scoreBefore;
-            const isAhead = signal.scoreAfter > opponentSignal.scoreAfter;
-            if (wasBehind && isAhead) {
-              overtaken.add(opponentId);
-            }
-          }
-          progress.overtakenOpponents = [...overtaken].sort((left, right) => left.localeCompare(right));
-          progress.overtakeCount = progress.overtakenOpponents.length;
-          if (progress.overtakeCount >= SNAKE_SECRET_QUEST_OVERTAKE_TARGET) {
-            assignment.completed = true;
-          }
-        }
-        break;
-      }
-      case "boost_then_food_5_in_5s": {
-        if (!assignment.completed) {
-          if (signal.boostActivated && signal.connected) {
-            progress.boostWindowTicksRemaining = toTicks(
-              SNAKE_SECRET_QUEST_BOOST_FOOD_WINDOW_SECONDS,
-              tickHz,
-            );
-            progress.boostWindowFoodCount = 0;
-          }
-
-          if (progress.boostWindowTicksRemaining > 0) {
-            if (signal.connected) {
-              progress.boostWindowFoodCount += signal.foodCollected;
-            }
-            if (progress.boostWindowFoodCount >= SNAKE_SECRET_QUEST_BOOST_FOOD_TARGET) {
-              assignment.completed = true;
-            }
-            progress.boostWindowTicksRemaining = Math.max(0, progress.boostWindowTicksRemaining - 1);
-          }
-        }
-        break;
-      }
-      default:
-        break;
     }
 
     assignment.progress = progress;
-
-    if (assignment.completed && !assignment.bonusAwarded) {
-      const snakeIndex = snakeIndexByPlayerId.get(playerId);
-      if (snakeIndex !== undefined) {
-        const snake = nextSnakes[snakeIndex];
-        if (snake !== undefined) {
-          nextSnakes[snakeIndex] = {
-            ...snake,
-            score: snake.score + SNAKE_SECRET_QUEST_BONUS_POINTS,
-          };
-        }
-      }
-      assignment.bonusAwarded = true;
-    }
-
+    applySecretQuestBonusIfNeeded(assignment, snakeIndexByPlayerId, nextSnakes);
     nextAssignments[playerId] = assignment;
   }
 
@@ -3572,6 +3480,134 @@ function advanceSecretQuests(
   };
 }
 
+function applySecretQuestBonusIfNeeded(
+  assignment: SnakeSecretQuestAssignmentInternal,
+  snakeIndexByPlayerId: Map<string, number>,
+  snakes: SnakePlayerState[],
+): void {
+  if (!assignment.completed || assignment.bonusAwarded) {
+    return;
+  }
+
+  const snakeIndex = snakeIndexByPlayerId.get(assignment.playerId);
+  if (snakeIndex !== undefined) {
+    const snake = snakes[snakeIndex];
+    if (snake !== undefined) {
+      snakes[snakeIndex] = {
+        ...snake,
+        score: snake.score + SNAKE_SECRET_QUEST_BONUS_POINTS,
+      };
+    }
+  }
+
+  assignment.bonusAwarded = true;
+}
+
+function finalizeRoundEndSecretQuests(
+  assignments: Record<string, SnakeSecretQuestAssignmentInternal>,
+  snakes: SnakePlayerState[],
+): {
+  assignments: Record<string, SnakeSecretQuestAssignmentInternal>;
+  snakes: SnakePlayerState[];
+} {
+  const nextAssignments = cloneSecretQuestAssignments(assignments);
+  const nextSnakes = snakes.map((snake) => cloneSnake(snake));
+  const snakeIndexByPlayerId = new Map(nextSnakes.map((snake, index) => [snake.playerId, index] as const));
+
+  for (const playerId of Object.keys(nextAssignments).sort((left, right) => left.localeCompare(right))) {
+    const assignment = nextAssignments[playerId];
+    if (assignment === undefined) {
+      continue;
+    }
+
+    if (
+      assignment.questType === "deaths_max_5_round" &&
+      !assignment.failed &&
+      !assignment.completed
+    ) {
+      assignment.completed = true;
+    }
+
+    applySecretQuestBonusIfNeeded(assignment, snakeIndexByPlayerId, nextSnakes);
+    nextAssignments[playerId] = assignment;
+  }
+
+  return {
+    assignments: nextAssignments,
+    snakes: nextSnakes,
+  };
+}
+
+function buildSecretQuestLive(
+  assignments: Record<string, SnakeSecretQuestAssignmentInternal>,
+  tickHz: number,
+): SnakeSecretQuestLiveEntry[] | null {
+  const entries = Object.values(assignments)
+    .sort((left, right) => left.playerId.localeCompare(right.playerId))
+    .map((assignment) => ({
+      playerId: assignment.playerId,
+      progressCurrent: resolveSecretQuestLiveCurrent(assignment),
+      progressTarget: resolveSecretQuestLiveTarget(assignment, tickHz),
+      questType: assignment.questType,
+      status: resolveSecretQuestLiveStatus(assignment),
+    }));
+
+  return entries.length === 0 ? null : entries;
+}
+
+function resolveSecretQuestLiveCurrent(assignment: SnakeSecretQuestAssignmentInternal): number {
+  switch (assignment.questType) {
+    case "deaths_max_5_round":
+      return assignment.progress.deathCountTotal;
+    case "food_streak_6_no_death":
+      return assignment.progress.foodStreak;
+    case "kills_6":
+      return assignment.progress.killCount;
+    case "drop_food_6":
+      return assignment.progress.dropFoodCount;
+    case "wrap_8":
+      return assignment.progress.wrapCount;
+    case "survive_30s_no_item":
+      return assignment.progress.surviveNoItemTicks;
+    default:
+      return 0;
+  }
+}
+
+function resolveSecretQuestLiveTarget(
+  assignment: SnakeSecretQuestAssignmentInternal,
+  tickHz: number,
+): number {
+  switch (assignment.questType) {
+    case "deaths_max_5_round":
+      return SNAKE_SECRET_QUEST_DEATHS_MAX;
+    case "food_streak_6_no_death":
+      return SNAKE_SECRET_QUEST_FOOD_STREAK_TARGET;
+    case "kills_6":
+      return SNAKE_SECRET_QUEST_KILLS_TARGET;
+    case "drop_food_6":
+      return SNAKE_SECRET_QUEST_DROP_FOOD_TARGET;
+    case "wrap_8":
+      return SNAKE_SECRET_QUEST_WRAP_TARGET;
+    case "survive_30s_no_item":
+      return toTicks(SNAKE_SECRET_QUEST_SURVIVE_NO_ITEM_SECONDS, tickHz);
+    default:
+      return 0;
+  }
+}
+
+function resolveSecretQuestLiveStatus(
+  assignment: SnakeSecretQuestAssignmentInternal,
+): SnakeSecretQuestLiveStatus {
+  if (assignment.failed) {
+    return "failed";
+  }
+  if (assignment.completed) {
+    return "completed";
+  }
+  return "active";
+}
+
 function buildSecretQuestRoundSummary(
   assignments: Record<string, SnakeSecretQuestAssignmentInternal>,
 ): SnakeSecretQuestRoundSummaryEntry[] | null {
@@ -3580,12 +3616,14 @@ function buildSecretQuestRoundSummary(
     .map((assignment) => ({
       bonusAwarded: assignment.bonusAwarded,
       completed: assignment.completed,
+      failed: assignment.failed,
       playerId: assignment.playerId,
       questType: assignment.questType,
     }));
 
   return entries.length === 0 ? null : entries;
 }
+
 function buildDropCandidates(segments: SnakePoint[], context: SnakeContext): SnakePoint[] {
   const offsets: SnakePoint[] = [
     { x: 0, y: 0 },

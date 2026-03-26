@@ -136,6 +136,86 @@ describe("snake views", () => {
     expect(html).toContain(">3<");
   });
 
+  it("renders the mobile secret quest card with player objective and progress", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(gamePlugin.ui.mobile!, {
+        gameState: {
+          aliveCount: 2,
+          coinrush: null,
+          coins: [],
+          countdownRemaining: null,
+          foods: [],
+          grid: {
+            height: 24,
+            width: 40,
+          },
+          itemSettings: {
+            boost: true,
+            magnet: true,
+            shield: true,
+          },
+          items: [],
+          latestMessage: "Round running.",
+          roundMode: "standard",
+          roundSecondsRemaining: 120,
+          secretQuestLive: [
+            {
+              playerId: "player-1",
+              progressCurrent: 2,
+              progressTarget: 5,
+              questType: "deaths_max_5_round",
+              status: "active",
+            },
+          ],
+          secretQuestRoundSummary: null,
+          secretQuestSettings: { enabled: true },
+          showIdentityLabels: false,
+          snakes: [
+            {
+              activeEffects: [],
+              alive: true,
+              coinCount: 0,
+              color: "#f4a259",
+              connected: true,
+              direction: "right",
+              head: { x: 4, y: 8 },
+              length: 4,
+              name: "Alice",
+              playerId: "player-1",
+              respawnTicksRemaining: null,
+              score: 3,
+              segments: [
+                { x: 4, y: 8 },
+                { x: 3, y: 8 },
+                { x: 2, y: 8 },
+                { x: 1, y: 8 },
+              ],
+              spawnProtectionTicksRemaining: 0,
+              speedBank: 0,
+              team: "A",
+              wins: 0,
+            },
+          ],
+          stage: "running",
+          tick: 15,
+          tickHz: 12,
+          winnerPlayerId: null,
+          winnerTeam: null,
+        },
+        hubSession: null,
+        phase: "game_running",
+        playerId: "player-1",
+        players: [],
+        role: "player",
+        sendInput: () => undefined,
+      }),
+    );
+
+    expect(html).toContain("Secret Quest");
+    expect(html).toContain("Die at most 5 times this round.");
+    expect(html).toContain("2/5");
+    expect(html).toContain("Status active");
+  });
   it("does not render host-control read-only hint in central window mode", () => {
     const originalWindow = (globalThis as { window?: unknown }).window;
     Object.defineProperty(globalThis, "window", {
