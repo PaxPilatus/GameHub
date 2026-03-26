@@ -196,19 +196,18 @@ function SnakeCentralView(props: GameCentralProps<SnakeState>) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const state = asSnakeState(props.gameState);
-  const centralReadOnly = isReadOnlyCentralWindow();
   const [canvasSize, setCanvasSize] = useState<SnakeCanvasSize>({
     height: snakeContext.gridHeight * 18,
     width: snakeContext.gridWidth * 18,
   });
 
-  const canEditItems =
-    !centralReadOnly && (state?.stage === "lobby" || state?.stage === "countdown");
+  const canEditItems = state?.stage === "lobby" || state?.stage === "countdown";
   const canEditMode = canEditItems;
   const canEditSecretQuests = canEditItems;
   const itemSettings = state?.itemSettings ?? DEFAULT_ITEM_SETTINGS;
   const roundMode = state?.roundMode ?? "standard";
   const secretQuestSettings = state?.secretQuestSettings ?? DEFAULT_SECRET_QUEST_SETTINGS;
+  const countdownOverlayText = resolveSnakeCountdownOverlayText(state);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -386,9 +385,6 @@ function SnakeCentralView(props: GameCentralProps<SnakeState>) {
           </button>
         </div>
         <div className="snake-toolbar-hints">
-          {centralReadOnly ? (
-            <span className="snake-item-toggle-hint">Central view is read-only for host controls.</span>
-          ) : null}
           <span className="snake-item-toggle-hint">
             {canEditMode
               ? "Mode editable in lobby/countdown"
@@ -404,10 +400,17 @@ function SnakeCentralView(props: GameCentralProps<SnakeState>) {
               ? "Secret quests editable in lobby/countdown"
               : `Round-frozen secret quests: ${secretQuestSettings.enabled ? "on" : "off"}`}
           </span>
+          <span className="snake-item-toggle-hint">Icons: bolt boost / U magnet / S shield</span>
+          <span className="snake-item-toggle-hint">Collectibles: coin 1 / gold 3 / hotspot H (zone only)</span>
         </div>
       </div>
       <div ref={stageRef} className="snake-canvas-stage">
         <canvas ref={canvasRef} className="snake-canvas" />
+        {countdownOverlayText === null ? null : (
+          <div className="snake-countdown-overlay">
+            <strong className="snake-countdown-pill">{countdownOverlayText}</strong>
+          </div>
+        )}
         <div className="snake-stage-overlay">
           <strong>{resolveSnakeCentralMessage(state)}</strong>
           <span>
@@ -596,14 +599,16 @@ function drawCoins(
   inset: number,
 ): void {
   for (const coin of coins) {
+    const centerX = coin.point.x * cellWidth + cellWidth / 2;
+    const centerY = coin.point.y * cellHeight + cellHeight / 2;
     const radius = coin.type === "gold"
       ? Math.max(1, Math.min(cellWidth, cellHeight) * 0.33)
       : Math.max(1, Math.min(cellWidth, cellHeight) * 0.26);
     context.fillStyle = coin.type === "gold" ? "#ffd166" : "#87d8ff";
     context.beginPath();
     context.arc(
-      coin.point.x * cellWidth + cellWidth / 2,
-      coin.point.y * cellHeight + cellHeight / 2,
+      centerX,
+      centerY,
       radius,
       0,
       Math.PI * 2,
@@ -612,6 +617,15 @@ function drawCoins(
     context.strokeStyle = coin.type === "gold" ? "rgba(255, 240, 198, 0.95)" : "rgba(205, 234, 252, 0.9)";
     context.lineWidth = Math.max(1, inset * 0.45);
     context.stroke();
+    drawCenteredGlyph(
+      context,
+      centerX,
+      centerY,
+      coin.type === "gold" ? "3" : "1",
+      Math.max(7, radius * 1.5),
+      "rgba(9, 19, 27, 0.92)",
+      "rgba(255, 255, 255, 0.88)",
+    );
   }
 }
 
@@ -625,22 +639,72 @@ function drawCoinrushHotspots(
     return;
   }
 
-  const drawHotspots = (hotspots: SnakePoint[], color: string, alpha: number) => {
+  const drawHotspots = (
+    hotspots: SnakePoint[],
+    fillColor: string,
+    strokeColor: string,
+    alpha: number,
+  ) => {
     for (const hotspot of hotspots) {
-      context.fillStyle = color;
+      const left = hotspot.x * cellWidth;
+      const top = hotspot.y * cellHeight;
+      const dash = Math.max(2, Math.round(Math.min(cellWidth, cellHeight) * 0.14));
+      context.save();
+      context.fillStyle = fillColor;
       context.globalAlpha = alpha;
       context.fillRect(
-        hotspot.x * cellWidth,
-        hotspot.y * cellHeight,
+        left,
+        top,
         cellWidth,
         cellHeight,
+      );
+      context.restore();
+      context.save();
+      context.strokeStyle = strokeColor;
+      context.lineWidth = Math.max(1, Math.min(cellWidth, cellHeight) * 0.08);
+      context.setLineDash([dash, dash]);
+      context.strokeRect(
+        left + 0.5,
+        top + 0.5,
+        Math.max(0, cellWidth - 1),
+        Math.max(0, cellHeight - 1),
+      );
+      context.restore();
+      drawCenteredGlyph(
+        context,
+        left + cellWidth / 2,
+        top + cellHeight / 2,
+        "H",
+        Math.max(7, Math.min(cellWidth, cellHeight) * 0.48),
+        "rgba(9, 19, 27, 0.92)",
+        "rgba(255, 255, 255, 0.72)",
       );
     }
   };
 
-  drawHotspots(coinrush.announcedHotspots, "#4cc9f0", 0.18);
-  drawHotspots(coinrush.activeHotspots, "#ffd166", 0.28);
-  context.globalAlpha = 1;
+  drawHotspots(coinrush.announcedHotspots, "#4cc9f0", "rgba(116, 220, 248, 0.9)", 0.14);
+  drawHotspots(coinrush.activeHotspots, "#ffd166", "rgba(255, 220, 132, 0.95)", 0.22);
+}
+
+function drawCenteredGlyph(
+  context: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  glyph: string,
+  fontSize: number,
+  fillStyle: string,
+  strokeStyle: string,
+): void {
+  context.save();
+  context.font = `800 ${fontSize}px "Segoe UI", "Inter", sans-serif`;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.lineWidth = Math.max(1, fontSize * 0.22);
+  context.strokeStyle = strokeStyle;
+  context.strokeText(glyph, centerX, centerY);
+  context.fillStyle = fillStyle;
+  context.fillText(glyph, centerX, centerY);
+  context.restore();
 }
 function drawItems(
   context: CanvasRenderingContext2D,
@@ -650,13 +714,20 @@ function drawItems(
   inset: number,
 ): void {
   for (const item of items) {
+    const tileLeft = item.point.x * cellWidth + inset;
+    const tileTop = item.point.y * cellHeight + inset;
+    const tileWidth = Math.max(1, cellWidth - inset * 2);
+    const tileHeight = Math.max(1, cellHeight - inset * 2);
+    const centerX = tileLeft + tileWidth / 2;
+    const centerY = tileTop + tileHeight / 2;
+    const glyphSize = Math.max(6, Math.min(tileWidth, tileHeight));
+
     context.fillStyle = resolveItemColor(item.type);
-    context.fillRect(
-      item.point.x * cellWidth + inset,
-      item.point.y * cellHeight + inset,
-      Math.max(1, cellWidth - inset * 2),
-      Math.max(1, cellHeight - inset * 2),
-    );
+    context.fillRect(tileLeft, tileTop, tileWidth, tileHeight);
+    context.strokeStyle = "rgba(255, 255, 255, 0.35)";
+    context.lineWidth = Math.max(1, inset * 0.45);
+    context.strokeRect(tileLeft, tileTop, tileWidth, tileHeight);
+    drawItemGlyph(context, item.type, centerX, centerY, glyphSize);
   }
 }
 
@@ -695,7 +766,132 @@ function drawSnakes(
         );
       }
     }
+
+    if (!state.showIdentityLabels || !snake.alive || snake.head === null) {
+      continue;
+    }
+    drawSnakeIdentityLabel(context, snake, state, cellWidth, cellHeight);
   }
+}
+
+function drawItemGlyph(
+  context: CanvasRenderingContext2D,
+  type: SnakeItem["type"],
+  centerX: number,
+  centerY: number,
+  size: number,
+): void {
+  const iconSize = Math.max(5, size * 0.5);
+
+  context.save();
+  context.translate(centerX, centerY);
+  context.lineCap = "round";
+  context.lineJoin = "round";
+
+  switch (type) {
+    case "boost": {
+      context.beginPath();
+      context.moveTo(iconSize * -0.28, iconSize * -0.5);
+      context.lineTo(iconSize * 0.1, iconSize * -0.05);
+      context.lineTo(iconSize * -0.02, iconSize * -0.05);
+      context.lineTo(iconSize * 0.24, iconSize * 0.5);
+      context.lineTo(iconSize * -0.12, iconSize * 0.08);
+      context.lineTo(iconSize * 0.02, iconSize * 0.08);
+      context.closePath();
+      context.fillStyle = "rgba(9, 19, 27, 0.88)";
+      context.fill();
+      context.strokeStyle = "rgba(255, 255, 255, 0.88)";
+      context.lineWidth = Math.max(1, iconSize * 0.11);
+      context.stroke();
+      break;
+    }
+    case "magnet": {
+      context.strokeStyle = "rgba(9, 19, 27, 0.9)";
+      context.lineWidth = Math.max(1.4, iconSize * 0.2);
+      context.beginPath();
+      context.moveTo(iconSize * -0.42, iconSize * -0.34);
+      context.lineTo(iconSize * -0.42, iconSize * 0.15);
+      context.arc(0, iconSize * 0.15, iconSize * 0.42, Math.PI, 0, false);
+      context.lineTo(iconSize * 0.42, iconSize * -0.34);
+      context.stroke();
+
+      context.fillStyle = "rgba(255, 255, 255, 0.92)";
+      context.fillRect(iconSize * -0.56, iconSize * -0.5, iconSize * 0.24, iconSize * 0.2);
+      context.fillRect(iconSize * 0.32, iconSize * -0.5, iconSize * 0.24, iconSize * 0.2);
+      break;
+    }
+    case "shield":
+    default: {
+      context.beginPath();
+      context.moveTo(0, iconSize * -0.54);
+      context.lineTo(iconSize * 0.45, iconSize * -0.2);
+      context.lineTo(iconSize * 0.3, iconSize * 0.32);
+      context.lineTo(0, iconSize * 0.56);
+      context.lineTo(iconSize * -0.3, iconSize * 0.32);
+      context.lineTo(iconSize * -0.45, iconSize * -0.2);
+      context.closePath();
+      context.fillStyle = "rgba(9, 19, 27, 0.88)";
+      context.fill();
+      context.strokeStyle = "rgba(255, 255, 255, 0.88)";
+      context.lineWidth = Math.max(1, iconSize * 0.1);
+      context.stroke();
+      break;
+    }
+  }
+
+  context.restore();
+}
+
+function drawSnakeIdentityLabel(
+  context: CanvasRenderingContext2D,
+  snake: SnakeState["snakes"][number],
+  state: SnakeState,
+  cellWidth: number,
+  cellHeight: number,
+): void {
+  if (snake.head === null) {
+    return;
+  }
+
+  const label = snake.name.trim() === "" ? snake.playerId : snake.name;
+  const fontSize = Math.max(16, Math.min(32, Math.floor(Math.min(cellWidth, cellHeight) * 0.84)));
+  const boardWidth = state.grid.width * cellWidth;
+  const boardHeight = state.grid.height * cellHeight;
+  const rawX = snake.head.x * cellWidth + cellWidth / 2;
+  const aboveY = snake.head.y * cellHeight - fontSize * 0.52;
+  const labelY = aboveY < fontSize ? snake.head.y * cellHeight + cellHeight + fontSize * 0.15 : aboveY;
+
+  context.save();
+  context.font = `700 ${fontSize}px "Segoe UI", "Inter", sans-serif`;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+
+  const labelWidth = context.measureText(label).width;
+  const clampedX = Math.max(labelWidth / 2 + 4, Math.min(boardWidth - labelWidth / 2 - 4, rawX));
+  const clampedY = Math.max(fontSize / 2 + 4, Math.min(boardHeight - fontSize / 2 - 4, labelY));
+
+  context.strokeStyle = "rgba(9, 19, 27, 0.96)";
+  context.lineWidth = Math.max(2, Math.min(8, fontSize * 0.33));
+  context.strokeText(label, clampedX, clampedY);
+  context.fillStyle = "rgba(255, 255, 255, 0.98)";
+  context.fillText(label, clampedX, clampedY);
+  context.restore();
+}
+
+function resolveSnakeCountdownOverlayText(state: SnakeState | null): string | null {
+  if (state === null) {
+    return null;
+  }
+
+  if (state.stage === "countdown") {
+    return state.countdownRemaining === null ? "3" : String(Math.max(1, state.countdownRemaining));
+  }
+
+  if (state.stage === "running" && state.tick <= Math.max(1, Math.floor(state.tickHz * 0.75))) {
+    return "GO!";
+  }
+
+  return null;
 }
 
 function resolveSnakeCentralMessage(state: SnakeState | null): string {
@@ -783,14 +979,6 @@ function formatEnabledItemTypes(settings: SnakeItemSettings): string {
 
 function formatRoundModeLabel(mode: SnakeRoundMode): string {
   return mode === "coinrush" ? "Coinrush" : "Standard";
-}
-
-function isReadOnlyCentralWindow(): boolean {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  return new URLSearchParams(window.location.search).get("view") === "central";
 }
 
 interface DirectionButtonProps {
@@ -1532,44 +1720,4 @@ export type {
   SnakePoint,
   SnakeSecretQuestsConfigPayload,
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

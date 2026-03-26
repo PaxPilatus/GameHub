@@ -89,9 +89,54 @@ describe("snake views", () => {
     expect(html).toContain("Shield");
     expect(html).toContain("Coinrush");
     expect(html).toContain("Secret Quests");
+    expect(html).toContain("Icons: bolt boost / U magnet / S shield");
+    expect(html).toContain("Collectibles: coin 1 / gold 3 / hotspot H (zone only)");
   });
 
-  it("renders host-control read-only hint in central window mode", () => {
+  it("renders the large central countdown overlay before round start", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(gamePlugin.ui.central!, {
+        gameState: {
+          aliveCount: 2,
+          coinrush: null,
+          coins: [],
+          countdownRemaining: 3,
+          foods: [],
+          grid: {
+            height: 24,
+            width: 40,
+          },
+          itemSettings: {
+            boost: true,
+            magnet: true,
+            shield: true,
+          },
+          items: [],
+          latestMessage: "Round starts in 3...",
+          roundMode: "standard",
+          roundSecondsRemaining: null,
+          secretQuestRoundSummary: null,
+          secretQuestSettings: { enabled: false },
+          showIdentityLabels: true,
+          snakes: [],
+          stage: "countdown",
+          tick: 0,
+          tickHz: 12,
+          winnerPlayerId: null,
+          winnerTeam: null,
+        },
+        hubSession: null,
+        invokeHostAction: async () => undefined,
+        phase: "game_running",
+        players: [],
+      }),
+    );
+
+    expect(html).toContain("snake-countdown-pill");
+    expect(html).toContain(">3<");
+  });
+
+  it("does not render host-control read-only hint in central window mode", () => {
     const originalWindow = (globalThis as { window?: unknown }).window;
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -142,7 +187,7 @@ describe("snake views", () => {
         }),
       );
 
-      expect(html).toContain("Central view is read-only for host controls.");
+      expect(html).not.toContain("read-only for host controls");
     } finally {
       if (originalWindow === undefined) {
         Reflect.deleteProperty(globalThis, "window");
@@ -156,3 +201,4 @@ describe("snake views", () => {
     }
   });
 });
+

@@ -91,7 +91,37 @@ describe("snake reducer", () => {
 
     expect(state.publicState.stage).toBe("running");
     expect(state.publicState.roundSecondsRemaining).toBe(180);
+    expect(state.publicState.foods.length).toBe(4);
     expect(state.publicState.items.length).toBe(1);
+  });
+
+  it("repositions lobby snakes when stopping to start a new game", () => {
+    const players = BASE_PLAYERS.slice(0, 2);
+    const context = createSnakeContext({ tickHz: 12 });
+    let state = createInitialSnakeEngineState(players, context);
+    const initialHeads = state.publicState.snakes.map((snake) => snake.head);
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players,
+        type: "game_started",
+      },
+      context,
+    );
+    state = advanceToRunning(state, players, context);
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players,
+        type: "game_stopped",
+      },
+      context,
+    );
+
+    expect(state.publicState.stage).toBe("lobby");
+    const lobbyHeads = state.publicState.snakes.map((snake) => snake.head);
+    expect(lobbyHeads).not.toEqual(initialHeads);
   });
 
   it("wraps at horizontal border instead of wall death", () => {
@@ -204,6 +234,353 @@ describe("snake reducer", () => {
     expect(alice.length).toBe(5);
   });
 
+  it("consumes magnet-pulled food immediately when it reaches the owner head", () => {
+    const context = createSnakeContext({ gridHeight: 14, gridWidth: 22, tickHz: 12 });
+    let state = createRunningState(BASE_PLAYERS.slice(0, 2), context);
+
+    state = withRunningSnakes(state, [
+      createSnake({
+        activeEffects: [{ type: "magnet", ticksRemaining: 60 }],
+        alive: true,
+        connected: true,
+        direction: "right",
+        name: "Alice",
+        playerId: "p1",
+        score: 0,
+        segments: [
+          { x: 4, y: 4 },
+          { x: 3, y: 4 },
+          { x: 2, y: 4 },
+          { x: 1, y: 4 },
+        ],
+        team: "A",
+      }),
+      createSnake({
+        alive: true,
+        connected: true,
+        direction: "right",
+        name: "Bob",
+        playerId: "p2",
+        score: 0,
+        segments: [
+          { x: 16, y: 10 },
+          { x: 15, y: 10 },
+          { x: 14, y: 10 },
+          { x: 13, y: 10 },
+        ],
+        team: "B",
+      }),
+    ]);
+
+    state = {
+      ...state,
+      publicState: {
+        ...state.publicState,
+        foods: [{ point: { x: 6, y: 4 }, source: "normal" }],
+        items: [],
+      },
+    };
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players: BASE_PLAYERS.slice(0, 2),
+        type: "tick",
+      },
+      context,
+    );
+
+    const alice = findSnake(state.publicState, "p1");
+    const bob = findSnake(state.publicState, "p2");
+    expect(alice.score).toBe(1);
+    expect(alice.length).toBe(5);
+    expect(bob.score).toBe(0);
+  });
+
+  it("allows other players to steal magnet-pulled food before owner consumes it", () => {
+    const context = createSnakeContext({ gridHeight: 14, gridWidth: 22, tickHz: 12 });
+    let state = createRunningState(BASE_PLAYERS.slice(0, 2), context);
+
+    state = withRunningSnakes(state, [
+      createSnake({
+        activeEffects: [{ type: "magnet", ticksRemaining: 60 }],
+        alive: true,
+        connected: true,
+        direction: "right",
+        name: "Alice",
+        playerId: "p1",
+        score: 0,
+        segments: [
+          { x: 4, y: 4 },
+          { x: 3, y: 4 },
+          { x: 2, y: 4 },
+          { x: 1, y: 4 },
+        ],
+        team: "A",
+      }),
+      createSnake({
+        alive: true,
+        connected: true,
+        direction: "left",
+        name: "Bob",
+        playerId: "p2",
+        score: 0,
+        segments: [
+          { x: 7, y: 4 },
+          { x: 8, y: 4 },
+          { x: 9, y: 4 },
+          { x: 10, y: 4 },
+        ],
+        team: "B",
+      }),
+    ]);
+
+    state = {
+      ...state,
+      publicState: {
+        ...state.publicState,
+        foods: [{ point: { x: 7, y: 4 }, source: "normal" }],
+        items: [],
+      },
+    };
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players: BASE_PLAYERS.slice(0, 2),
+        type: "tick",
+      },
+      context,
+    );
+
+    const alice = findSnake(state.publicState, "p1");
+    const bob = findSnake(state.publicState, "p2");
+    expect(alice.score).toBe(0);
+    expect(bob.score).toBe(1);
+    expect(bob.length).toBe(5);
+  });
+
+  it("consumes magnet-adjacent food after one priming tick", () => {
+    const context = createSnakeContext({ gridHeight: 14, gridWidth: 22, tickHz: 12 });
+    let state = createRunningState(BASE_PLAYERS.slice(0, 2), context);
+
+    state = withRunningSnakes(state, [
+      createSnake({
+        activeEffects: [{ type: "magnet", ticksRemaining: 60 }],
+        alive: true,
+        connected: true,
+        direction: "right",
+        name: "Alice",
+        playerId: "p1",
+        score: 0,
+        segments: [
+          { x: 4, y: 4 },
+          { x: 3, y: 4 },
+          { x: 2, y: 4 },
+          { x: 1, y: 4 },
+        ],
+        team: "A",
+      }),
+      createSnake({
+        alive: true,
+        connected: true,
+        direction: "left",
+        name: "Bob",
+        playerId: "p2",
+        score: 0,
+        segments: [
+          { x: 18, y: 10 },
+          { x: 19, y: 10 },
+          { x: 20, y: 10 },
+          { x: 21, y: 10 },
+        ],
+        team: "B",
+      }),
+    ]);
+
+    state = {
+      ...state,
+      publicState: {
+        ...state.publicState,
+        foods: [{ point: { x: 4, y: 5 }, source: "normal" }],
+        items: [],
+      },
+    };
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players: BASE_PLAYERS.slice(0, 2),
+        type: "tick",
+      },
+      context,
+    );
+
+    expect(findSnake(state.publicState, "p1").score).toBe(0);
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players: BASE_PLAYERS.slice(0, 2),
+        type: "tick",
+      },
+      context,
+    );
+
+    const alice = findSnake(state.publicState, "p1");
+    expect(alice.score).toBe(1);
+    expect(alice.length).toBe(5);
+  });
+
+  it("consumes magnet-adjacent coins after one priming tick in coinrush", () => {
+    const context = createSnakeContext({ gridHeight: 14, gridWidth: 22, tickHz: 12 });
+    let state = createRunningState(BASE_PLAYERS.slice(0, 2), context);
+
+    state = withRunningSnakes(state, [
+      createSnake({
+        activeEffects: [{ type: "magnet", ticksRemaining: 60 }],
+        alive: true,
+        connected: true,
+        direction: "right",
+        name: "Alice",
+        playerId: "p1",
+        score: 0,
+        segments: [
+          { x: 4, y: 4 },
+          { x: 3, y: 4 },
+          { x: 2, y: 4 },
+          { x: 1, y: 4 },
+        ],
+        team: "A",
+      }),
+      createSnake({
+        alive: true,
+        connected: true,
+        direction: "left",
+        name: "Bob",
+        playerId: "p2",
+        score: 0,
+        segments: [
+          { x: 18, y: 10 },
+          { x: 19, y: 10 },
+          { x: 20, y: 10 },
+          { x: 21, y: 10 },
+        ],
+        team: "B",
+      }),
+    ]);
+
+    state = {
+      ...state,
+      publicState: {
+        ...state.publicState,
+        coinrush: {
+          activeHotspots: [],
+          announcedHotspots: [],
+          phase: "announce",
+          phaseTicksRemaining: 30,
+          wave: 1,
+        },
+        coins: [{ point: { x: 4, y: 5 }, type: "normal", value: 1 }],
+        foods: [],
+        items: [],
+        roundMode: "coinrush",
+      },
+      roundModeFrozen: "coinrush",
+    };
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players: BASE_PLAYERS.slice(0, 2),
+        type: "tick",
+      },
+      context,
+    );
+
+    expect(findSnake(state.publicState, "p1").coinCount).toBe(0);
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players: BASE_PLAYERS.slice(0, 2),
+        type: "tick",
+      },
+      context,
+    );
+
+    expect(findSnake(state.publicState, "p1").coinCount).toBe(1);
+  });
+
+  it("clears primed magnet adjacency when magnet expires", () => {
+    const context = createSnakeContext({ gridHeight: 14, gridWidth: 22, tickHz: 12 });
+    let state = createRunningState(BASE_PLAYERS.slice(0, 2), context);
+
+    state = withRunningSnakes(state, [
+      createSnake({
+        activeEffects: [{ type: "magnet", ticksRemaining: 1 }],
+        alive: true,
+        connected: true,
+        direction: "right",
+        name: "Alice",
+        playerId: "p1",
+        score: 0,
+        segments: [
+          { x: 4, y: 4 },
+          { x: 3, y: 4 },
+          { x: 2, y: 4 },
+          { x: 1, y: 4 },
+        ],
+        team: "A",
+      }),
+      createSnake({
+        alive: true,
+        connected: true,
+        direction: "left",
+        name: "Bob",
+        playerId: "p2",
+        score: 0,
+        segments: [
+          { x: 18, y: 10 },
+          { x: 19, y: 10 },
+          { x: 20, y: 10 },
+          { x: 21, y: 10 },
+        ],
+        team: "B",
+      }),
+    ]);
+
+    state = {
+      ...state,
+      publicState: {
+        ...state.publicState,
+        foods: [{ point: { x: 4, y: 5 }, source: "normal" }],
+        items: [],
+      },
+    };
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players: BASE_PLAYERS.slice(0, 2),
+        type: "tick",
+      },
+      context,
+    );
+
+    expect(findSnake(state.publicState, "p1").score).toBe(0);
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players: BASE_PLAYERS.slice(0, 2),
+        type: "tick",
+      },
+      context,
+    );
+
+    expect(findSnake(state.publicState, "p1").score).toBe(0);
+  });
   it("awards +3 for clear foreign body collision", () => {
     const context = createSnakeContext({ gridHeight: 16, gridWidth: 24, tickHz: 12 });
     let state = createRunningState(BASE_PLAYERS.slice(0, 2), context);
@@ -322,6 +699,138 @@ describe("snake reducer", () => {
     expect(alice.alive).toBe(false);
   });
 
+  it("does not consume shield while spawn protection negates collision", () => {
+    const context = createSnakeContext({ gridHeight: 18, gridWidth: 24, tickHz: 12 });
+    let state = createRunningState(BASE_PLAYERS.slice(0, 2), context);
+
+    state = withRunningSnakes(state, [
+      createSnake({
+        activeEffects: [{ charges: 1, ticksRemaining: 72, type: "shield" }],
+        alive: true,
+        connected: true,
+        direction: "right",
+        name: "Alice",
+        playerId: "p1",
+        score: 0,
+        segments: [
+          { x: 4, y: 4 },
+          { x: 3, y: 4 },
+          { x: 2, y: 4 },
+          { x: 1, y: 4 },
+        ],
+        team: "A",
+      }),
+      createSnake({
+        alive: true,
+        connected: true,
+        direction: "right",
+        name: "Bob",
+        playerId: "p2",
+        score: 0,
+        segments: [
+          { x: 7, y: 4 },
+          { x: 6, y: 4 },
+          { x: 5, y: 4 },
+          { x: 4, y: 4 },
+        ],
+        team: "B",
+      }),
+    ]);
+
+    state = {
+      ...state,
+      publicState: {
+        ...state.publicState,
+        snakes: state.publicState.snakes.map((snake) =>
+          snake.playerId === "p1"
+            ? {
+                ...snake,
+                spawnProtectionTicksRemaining: 5,
+              }
+            : snake,
+        ),
+      },
+    };
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players: BASE_PLAYERS.slice(0, 2),
+        type: "tick",
+      },
+      context,
+    );
+
+    const alice = findSnake(state.publicState, "p1");
+    const shield = alice.activeEffects.find((effect) => effect.type === "shield");
+    expect(alice.alive).toBe(true);
+    expect(alice.spawnProtectionTicksRemaining).toBe(4);
+    expect(shield?.charges).toBe(1);
+  });
+
+  it("clears boost effect and speed bank on respawn", () => {
+    const context = createSnakeContext({ gridHeight: 20, gridWidth: 30, tickHz: 12 });
+    let state = createRunningState(BASE_PLAYERS.slice(0, 2), context);
+
+    state = withRunningSnakes(state, [
+      createSnake({
+        activeEffects: [{ charges: 0, ticksRemaining: 20, type: "boost" }],
+        alive: false,
+        connected: true,
+        direction: "right",
+        name: "Alice",
+        playerId: "p1",
+        respawnTicksRemaining: 0,
+        score: 0,
+        segments: [],
+        team: "A",
+      }),
+      createSnake({
+        alive: true,
+        connected: true,
+        direction: "right",
+        name: "Bob",
+        playerId: "p2",
+        score: 0,
+        segments: [
+          { x: 20, y: 10 },
+          { x: 19, y: 10 },
+          { x: 18, y: 10 },
+          { x: 17, y: 10 },
+        ],
+        team: "B",
+      }),
+    ]);
+
+    state = {
+      ...state,
+      publicState: {
+        ...state.publicState,
+        snakes: state.publicState.snakes.map((snake) =>
+          snake.playerId === "p1"
+            ? {
+                ...snake,
+                speedBank: 0.9,
+              }
+            : snake,
+        ),
+      },
+    };
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players: BASE_PLAYERS.slice(0, 2),
+        type: "tick",
+      },
+      context,
+    );
+
+    const alice = findSnake(state.publicState, "p1");
+    expect(alice.alive).toBe(true);
+    expect(alice.activeEffects).toHaveLength(0);
+    expect(alice.speedBank).toBe(0);
+  });
   it("respawns after 30 ticks with 12 ticks spawn protection", () => {
     const context = createSnakeContext({ gridHeight: 20, gridWidth: 30, tickHz: 12 });
     let state = createRunningState(BASE_PLAYERS.slice(0, 2), context);
@@ -543,6 +1052,57 @@ describe("snake reducer", () => {
     expect(state.publicState.items.length).toBe(3);
   });
 
+  it("rotates item types deterministically for two-player target-one refills", () => {
+    const context = createSnakeContext({ tickHz: 12 });
+    const players = BASE_PLAYERS.slice(0, 2);
+    let state = createInitialSnakeEngineState(players, context);
+
+    state = reduceSnakeEngineState(
+      state,
+      {
+        players,
+        type: "game_started",
+      },
+      context,
+    );
+
+    state = advanceToRunning(state, players, context);
+    state = {
+      ...state,
+      itemRespawnDelayTicksRemaining: 0,
+      itemTypeCursor: 0,
+      publicState: {
+        ...state.publicState,
+        items: [],
+      },
+    };
+
+    const spawnedTypes: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      state = reduceSnakeEngineState(
+        state,
+        {
+          players,
+          type: "tick",
+        },
+        context,
+      );
+      const spawned = state.publicState.items[0];
+      expect(spawned).toBeDefined();
+      spawnedTypes.push(spawned?.type ?? "");
+      state = {
+        ...state,
+        itemRespawnDelayTicksRemaining: 0,
+        publicState: {
+          ...state.publicState,
+          items: [],
+        },
+      };
+    }
+
+    expect(spawnedTypes).toEqual(["boost", "magnet", "shield"]);
+  });
+
   it("freezes coinrush mode at running start and uses 120 seconds", () => {
     const context = createSnakeContext({ tickHz: 12 });
     const players = BASE_PLAYERS.slice(0, 2);
@@ -755,10 +1315,12 @@ describe("snake reducer", () => {
 
     state = advanceToRunning(state, players, context);
 
-    const sample = state.publicState.foods.slice(0, 10);
-    expect(sample.length).toBeGreaterThanOrEqual(8);
-    expect(new Set(sample.map((food) => food.point.y)).size).toBeGreaterThan(1);
-    expect(new Set(sample.map((food) => food.point.x)).size).toBeGreaterThan(3);
+    const sample = state.publicState.foods;
+    expect(sample.length).toBe(4);
+
+    const uniqueRows = new Set(sample.map((food) => food.point.y)).size;
+    const uniqueColumns = new Set(sample.map((food) => food.point.x)).size;
+    expect(uniqueRows > 1 || uniqueColumns > 1).toBe(true);
   });
 
   it("resets remaining coins when coinrush wave transitions active -> announce", () => {
@@ -1083,13 +1645,4 @@ function findSnake(state: SnakeState, playerId: string): SnakePlayerState {
   }
   return snake;
 }
-
-
-
-
-
-
-
-
-
 

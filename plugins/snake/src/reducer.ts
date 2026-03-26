@@ -18,8 +18,7 @@ export const SNAKE_SPAWN_PROTECTION_SECONDS = 1;
 
 const SNAKE_COUNTDOWN_SECONDS = 3;
 const SNAKE_DROP_RATIO = 0.75;
-const SNAKE_FOOD_AREA_FACTOR = 0.025;
-const SNAKE_FOOD_ALIVE_FACTOR = 1.5;
+const SNAKE_FOOD_BASE_TARGET = 2;
 const SNAKE_KILL_POINTS = 3;
 const SNAKE_FOOD_POINTS = 1;
 const SNAKE_BOOST_MULTIPLIER = 1.3;
@@ -290,6 +289,8 @@ export interface SnakeEngineState {
   countdownTicksRemaining: number | null;
   itemRespawnDelayTicksRemaining: number;
   itemSpawnCursor: number;
+  itemTypeCursor: number;
+  magnetAdjacencyPrimed: Record<string, { coin: boolean; food: boolean }>;
   pendingDirections: Record<string, SnakeDirection>;
   publicState: SnakeState;
   roundItemSettings: SnakeItemSettings;
@@ -298,6 +299,7 @@ export interface SnakeEngineState {
   roundQuestMeta: SnakeSecretQuestMetaInternal;
   roundSecretQuestEnabled: boolean;
   roundTicksRemaining: number | null;
+  spawnEpoch: number;
 }
 
 export interface SnakeContext {
@@ -404,6 +406,7 @@ interface ItemConsumptionResult {
 interface ItemRefillResult {
   items: SnakeItem[];
   nextCursor: number;
+  nextTypeCursor: number;
 }
 
 interface CoinRefillResult {
@@ -412,8 +415,19 @@ interface CoinRefillResult {
 }
 
 interface MagnetPullResult {
+  coinOwnersByKey: Map<string, string>;
   coins: SnakeCoin[];
+  foodOwnersByKey: Map<string, string>;
   foods: SnakeFood[];
+}
+
+interface MagnetAdjacencyConsumptionResult {
+  coins: SnakeCoin[];
+  consumedCoinsByPlayer: Map<string, number>;
+  consumedFoodsByPlayer: Map<string, { drop: number; normal: number; total: number }>;
+  foods: SnakeFood[];
+  nextPrimed: Record<string, { coin: boolean; food: boolean }>;
+  snakes: SnakePlayerState[];
 }
 
 export function createSnakeContext(options: Partial<SnakeContext> = {}): SnakeContext {
@@ -432,7 +446,7 @@ export function createInitialSnakeEngineState(
   const lobbyGrid = resolveLobbyGridDimensions(players.filter((player) => player.connected).length);
   const lobbyContext = buildEffectiveContext(context, lobbyGrid.width, lobbyGrid.height);
   const mappedSnakes = mapPlayersToSnakeState([], players, lobbyContext);
-  const snakes = placeLobbySnakes(mappedSnakes, lobbyContext);
+  const snakes = placeLobbySnakes(mappedSnakes, lobbyContext, 0);
   const itemSettings = createDefaultItemSettings();
   const secretQuestSettings = createDefaultSecretQuestSettings();
 
@@ -441,6 +455,8 @@ export function createInitialSnakeEngineState(
     countdownTicksRemaining: null,
     itemRespawnDelayTicksRemaining: 0,
     itemSpawnCursor: 0,
+    itemTypeCursor: 0,
+    magnetAdjacencyPrimed: {},
     pendingDirections: {},
     publicState: {
       aliveCount: countAlive(snakes),
@@ -473,6 +489,7 @@ export function createInitialSnakeEngineState(
     roundQuestMeta: createInitialSecretQuestMeta(),
     roundSecretQuestEnabled: false,
     roundTicksRemaining: null,
+    spawnEpoch: 0,
   };
 }
 
@@ -591,6 +608,7 @@ function beginRunning(state: SnakeEngineState, context: SnakeContext): SnakeEngi
     roundContext,
     roundItemSettings,
     state.itemSpawnCursor,
+    state.itemTypeCursor,
     reservedRespawnPoints,
   );
   const coinrush =
@@ -609,6 +627,8 @@ function beginRunning(state: SnakeEngineState, context: SnakeContext): SnakeEngi
     countdownTicksRemaining: null,
     itemRespawnDelayTicksRemaining: 0,
     itemSpawnCursor: initialItems.nextCursor,
+    itemTypeCursor: initialItems.nextTypeCursor,
+    magnetAdjacencyPrimed: {},
     pendingDirections: state.pendingDirections,
     publicState: {
       ...state.publicState,
@@ -650,9 +670,11 @@ function advanceRunningTick(state: SnakeEngineState, context: SnakeContext): Sna
   let coinrush = cloneCoinrush(state.publicState.coinrush);
   let itemDelay = state.itemRespawnDelayTicksRemaining;
   let itemCursor = state.itemSpawnCursor;
+  let itemTypeCursor = state.itemTypeCursor;
   let coinCursor = state.coinSpawnCursor;
   let roundQuestAssignments = cloneSecretQuestAssignments(state.roundQuestAssignments);
   let roundQuestMeta = cloneSecretQuestMeta(state.roundQuestMeta);
+  let magnetAdjacencyPrimed = cloneMagnetAdjacencyPrimed(state.magnetAdjacencyPrimed);
 
   const questSignals = createQuestSignalFrame(snakes);
 
@@ -727,7 +749,25 @@ function advanceRunningTick(state: SnakeEngineState, context: SnakeContext): Sna
     coinAfterMagnet.consumedByPlayer,
     coinrush?.phase === "active" ? coinrush.wave : null,
   );
-
+  const magnetAdjacencyConsumption = consumeMagnetAdjacentCollectibles(
+    snakes,
+    foods,
+    coins,
+    magnetResult.foodOwnersByKey,
+    magnetResult.coinOwnersByKey,
+    magnetAdjacencyPrimed,
+    roundContext,
+  );
+  snakes = magnetAdjacencyConsumption.snakes;
+  foods = magnetAdjacencyConsumption.foods;
+  coins = magnetAdjacencyConsumption.coins;
+  magnetAdjacencyPrimed = magnetAdjacencyConsumption.nextPrimed;
+  recordFoodQuestSignals(questSignals, magnetAdjacencyConsumption.consumedFoodsByPlayer);
+  recordCoinQuestSignals(
+    questSignals,
+    magnetAdjacencyConsumption.consumedCoinsByPlayer,
+    coinrush?.phase === "active" ? coinrush.wave : null,
+  );
   const respawnResult = respawnEligibleSnakes(
     snakes,
     foods,
@@ -785,10 +825,12 @@ function advanceRunningTick(state: SnakeEngineState, context: SnakeContext): Sna
       roundContext,
       state.roundItemSettings,
       itemCursor,
+      itemTypeCursor,
       reservedRespawnPoints,
     );
     items = refillItemsResult.items;
     itemCursor = refillItemsResult.nextCursor;
+    itemTypeCursor = refillItemsResult.nextTypeCursor;
   }
 
   snakes = decrementProtectionAndEffects(snakes, activatedEffects, respawnedIds);
@@ -818,6 +860,8 @@ function advanceRunningTick(state: SnakeEngineState, context: SnakeContext): Sna
     countdownTicksRemaining: null,
     itemRespawnDelayTicksRemaining: itemDelay,
     itemSpawnCursor: itemCursor,
+    itemTypeCursor,
+    magnetAdjacencyPrimed,
     pendingDirections: {},
     publicState: {
       ...state.publicState,
@@ -873,6 +917,7 @@ function finalizeRoundByTime(state: SnakeEngineState): SnakeEngineState {
   return {
     ...state,
     countdownTicksRemaining: null,
+    magnetAdjacencyPrimed: {},
     pendingDirections: {},
     publicState: {
       ...state.publicState,
@@ -1239,7 +1284,10 @@ function applyKillPoints(snakes: SnakePlayerState[], killPoints: Map<string, num
   });
 }
 
-function consumeFoods(snakes: SnakePlayerState[], foods: SnakeFood[]): FoodConsumptionResult {
+function consumeFoods(
+  snakes: SnakePlayerState[],
+  foods: SnakeFood[],
+): FoodConsumptionResult {
   if (foods.length === 0) {
     return {
       consumedByPlayer: new Map(),
@@ -1467,7 +1515,12 @@ function applyMagnetPull(
     .sort((left, right) => left.playerId.localeCompare(right.playerId));
 
   if (magnetSnakes.length === 0) {
-    return { foods, coins };
+    return {
+      coinOwnersByKey: new Map(),
+      coins,
+      foodOwnersByKey: new Map(),
+      foods,
+    };
   }
 
   const bodyBlockedKeys = new Set<string>();
@@ -1485,6 +1538,7 @@ function applyMagnetPull(
 
   const itemKeys = new Set(items.map((item) => pointKey(item.point)));
   const movedFoods: SnakeFood[] = [];
+  const foodOwnersByKey = new Map<string, string>();
   const movedFoodKeys = new Set<string>();
 
   for (const food of foods) {
@@ -1500,27 +1554,33 @@ function applyMagnetPull(
     const blocked =
       bodyBlockedKeys.has(pulledKey) || itemKeys.has(pulledKey) || movedFoodKeys.has(pulledKey);
 
-    if (blocked) {
-      movedFoods.push(food);
-      movedFoodKeys.add(pointKey(food.point));
-      continue;
+    const nextPoint = blocked ? food.point : pulledPoint;
+    const nextKey = pointKey(nextPoint);
+    movedFoods.push(
+      blocked
+        ? food
+        : {
+            ...food,
+            point: nextPoint,
+          },
+    );
+    movedFoodKeys.add(nextKey);
+    if (!foodOwnersByKey.has(nextKey)) {
+      foodOwnersByKey.set(nextKey, selected.playerId);
     }
-
-    movedFoods.push({
-      ...food,
-      point: pulledPoint,
-    });
-    movedFoodKeys.add(pulledKey);
   }
 
   if (mode !== "coinrush" || coins.length === 0) {
     return {
+      coinOwnersByKey: new Map(),
       coins,
+      foodOwnersByKey,
       foods: movedFoods,
     };
   }
 
   const movedCoins: SnakeCoin[] = [];
+  const coinOwnersByKey = new Map<string, string>();
   const movedCoinKeys = new Set<string>();
 
   for (const coin of coins) {
@@ -1539,21 +1599,26 @@ function applyMagnetPull(
       movedFoodKeys.has(pulledKey) ||
       movedCoinKeys.has(pulledKey);
 
-    if (blocked) {
-      movedCoins.push(coin);
-      movedCoinKeys.add(pointKey(coin.point));
-      continue;
+    const nextPoint = blocked ? coin.point : pulledPoint;
+    const nextKey = pointKey(nextPoint);
+    movedCoins.push(
+      blocked
+        ? coin
+        : {
+            ...coin,
+            point: nextPoint,
+          },
+    );
+    movedCoinKeys.add(nextKey);
+    if (!coinOwnersByKey.has(nextKey)) {
+      coinOwnersByKey.set(nextKey, selected.playerId);
     }
-
-    movedCoins.push({
-      ...coin,
-      point: pulledPoint,
-    });
-    movedCoinKeys.add(pulledKey);
   }
 
   return {
+    coinOwnersByKey,
     coins: movedCoins,
+    foodOwnersByKey,
     foods: movedFoods,
   };
 }
@@ -1586,6 +1651,210 @@ function selectMagnetOwner(
   }
 
   return selected;
+}
+function consumeMagnetAdjacentCollectibles(
+  snakes: SnakePlayerState[],
+  foods: SnakeFood[],
+  coins: SnakeCoin[],
+  foodOwnersByKey: Map<string, string>,
+  coinOwnersByKey: Map<string, string>,
+  primed: Record<string, { coin: boolean; food: boolean }>,
+  context: SnakeContext,
+): MagnetAdjacencyConsumptionResult {
+  const magnetOwnersById = new Map(
+    snakes
+      .filter(
+        (snake) =>
+          snake.alive &&
+          snake.connected &&
+          snake.head !== null &&
+          hasActiveEffect(snake, "magnet"),
+      )
+      .map((snake) => [snake.playerId, snake] as const),
+  );
+
+  const foodCandidatesByOwner = new Map<string, SnakeFood[]>();
+  for (const food of foods) {
+    const ownerId = foodOwnersByKey.get(pointKey(food.point));
+    if (ownerId === undefined) {
+      continue;
+    }
+    const owner = magnetOwnersById.get(ownerId);
+    if (owner === undefined || owner.head === null) {
+      continue;
+    }
+    if (toroidalManhattanDistance(food.point, owner.head, context) > 1) {
+      continue;
+    }
+    const candidates = foodCandidatesByOwner.get(ownerId) ?? [];
+    candidates.push(food);
+    foodCandidatesByOwner.set(ownerId, candidates);
+  }
+
+  const coinCandidatesByOwner = new Map<string, SnakeCoin[]>();
+  for (const coin of coins) {
+    const ownerId = coinOwnersByKey.get(pointKey(coin.point));
+    if (ownerId === undefined) {
+      continue;
+    }
+    const owner = magnetOwnersById.get(ownerId);
+    if (owner === undefined || owner.head === null) {
+      continue;
+    }
+    if (toroidalManhattanDistance(coin.point, owner.head, context) > 1) {
+      continue;
+    }
+    const candidates = coinCandidatesByOwner.get(ownerId) ?? [];
+    candidates.push(coin);
+    coinCandidatesByOwner.set(ownerId, candidates);
+  }
+
+  const consumedFoodsByPlayer = new Map<string, { drop: number; normal: number; total: number }>();
+  const consumedCoinsByPlayer = new Map<string, number>();
+  const selectedFoodKeys = new Set<string>();
+  const selectedCoinKeys = new Set<string>();
+  const nextPrimed: Record<string, { coin: boolean; food: boolean }> = {};
+  const orderedOwnerIds = [...magnetOwnersById.keys()].sort((left, right) => left.localeCompare(right));
+
+  for (const ownerId of orderedOwnerIds) {
+    const owner = magnetOwnersById.get(ownerId);
+    if (owner === undefined || owner.head === null) {
+      continue;
+    }
+
+    const foodCandidates = [...(foodCandidatesByOwner.get(ownerId) ?? [])].sort((left, right) => {
+      const leftDistance = toroidalManhattanDistance(left.point, owner.head ?? left.point, context);
+      const rightDistance = toroidalManhattanDistance(right.point, owner.head ?? right.point, context);
+      if (leftDistance !== rightDistance) {
+        return leftDistance - rightDistance;
+      }
+      const keyCompare = pointKey(left.point).localeCompare(pointKey(right.point));
+      if (keyCompare !== 0) {
+        return keyCompare;
+      }
+      return left.source.localeCompare(right.source);
+    });
+
+    let consumedFoodForOwner = false;
+    if (foodCandidates.length > 0 && (primed[ownerId]?.food ?? false)) {
+      const selectedFood = foodCandidates.find((candidate) => !selectedFoodKeys.has(pointKey(candidate.point)));
+      if (selectedFood !== undefined) {
+        consumedFoodForOwner = true;
+        selectedFoodKeys.add(pointKey(selectedFood.point));
+        const current = consumedFoodsByPlayer.get(ownerId) ?? { drop: 0, normal: 0, total: 0 };
+        consumedFoodsByPlayer.set(ownerId, {
+          drop: current.drop + (selectedFood.source === "drop" ? 1 : 0),
+          normal: current.normal + (selectedFood.source === "normal" ? 1 : 0),
+          total: current.total + 1,
+        });
+      }
+    }
+
+    const shouldPrimeFood = foodCandidates.length > 0 && (!consumedFoodForOwner || foodCandidates.length > 1);
+    if (shouldPrimeFood) {
+      const current = nextPrimed[ownerId] ?? { coin: false, food: false };
+      nextPrimed[ownerId] = {
+        ...current,
+        food: true,
+      };
+    }
+
+    const coinCandidates = [...(coinCandidatesByOwner.get(ownerId) ?? [])].sort((left, right) => {
+      const leftDistance = toroidalManhattanDistance(left.point, owner.head ?? left.point, context);
+      const rightDistance = toroidalManhattanDistance(right.point, owner.head ?? right.point, context);
+      if (leftDistance !== rightDistance) {
+        return leftDistance - rightDistance;
+      }
+      const keyCompare = pointKey(left.point).localeCompare(pointKey(right.point));
+      if (keyCompare !== 0) {
+        return keyCompare;
+      }
+      return left.value - right.value;
+    });
+
+    let consumedCoinForOwner = false;
+    if (coinCandidates.length > 0 && (primed[ownerId]?.coin ?? false)) {
+      const selectedCoin = coinCandidates.find((candidate) => !selectedCoinKeys.has(pointKey(candidate.point)));
+      if (selectedCoin !== undefined) {
+        consumedCoinForOwner = true;
+        selectedCoinKeys.add(pointKey(selectedCoin.point));
+        consumedCoinsByPlayer.set(ownerId, (consumedCoinsByPlayer.get(ownerId) ?? 0) + selectedCoin.value);
+      }
+    }
+
+    const shouldPrimeCoin = coinCandidates.length > 0 && (!consumedCoinForOwner || coinCandidates.length > 1);
+    if (shouldPrimeCoin) {
+      const current = nextPrimed[ownerId] ?? { coin: false, food: false };
+      nextPrimed[ownerId] = {
+        ...current,
+        coin: true,
+      };
+    }
+  }
+
+  if (selectedFoodKeys.size === 0 && selectedCoinKeys.size === 0) {
+    return {
+      coins,
+      consumedCoinsByPlayer,
+      consumedFoodsByPlayer,
+      foods,
+      nextPrimed,
+      snakes,
+    };
+  }
+
+  const nextSnakes = snakes.map((snake) => cloneSnake(snake));
+  const indexByPlayerId = new Map(nextSnakes.map((snake, index) => [snake.playerId, index] as const));
+  for (const [playerId, consumed] of consumedFoodsByPlayer) {
+    if (consumed.total <= 0) {
+      continue;
+    }
+    const index = indexByPlayerId.get(playerId);
+    if (index === undefined) {
+      continue;
+    }
+    const snake = nextSnakes[index];
+    if (snake === undefined) {
+      continue;
+    }
+    let grownSegments = snake.segments;
+    for (let count = 0; count < consumed.total; count += 1) {
+      grownSegments = growSegmentsByOne(grownSegments);
+    }
+    nextSnakes[index] = {
+      ...snake,
+      length: snake.length + consumed.total,
+      score: snake.score + consumed.total * SNAKE_FOOD_POINTS,
+      segments: grownSegments,
+    };
+  }
+
+  for (const [playerId, value] of consumedCoinsByPlayer) {
+    if (value <= 0) {
+      continue;
+    }
+    const index = indexByPlayerId.get(playerId);
+    if (index === undefined) {
+      continue;
+    }
+    const snake = nextSnakes[index];
+    if (snake === undefined) {
+      continue;
+    }
+    nextSnakes[index] = {
+      ...snake,
+      coinCount: snake.coinCount + value,
+    };
+  }
+
+  return {
+    coins: coins.filter((coin) => !selectedCoinKeys.has(pointKey(coin.point))),
+    consumedCoinsByPlayer,
+    consumedFoodsByPlayer,
+    foods: foods.filter((food) => !selectedFoodKeys.has(pointKey(food.point))),
+    nextPrimed,
+    snakes: nextSnakes,
+  };
 }
 
 function respawnEligibleSnakes(
@@ -1896,6 +2165,7 @@ function refillItems(
   context: SnakeContext,
   settings: SnakeItemSettings,
   cursor: number,
+  typeCursor: number,
   respawnReservationPoints: SnakePoint[],
 ): ItemRefillResult {
   const enabledTypes = ITEM_TYPES.filter((type) => isItemTypeEnabled(type, settings));
@@ -1903,6 +2173,7 @@ function refillItems(
     return {
       items: [],
       nextCursor: cursor,
+      nextTypeCursor: typeCursor,
     };
   }
 
@@ -1916,6 +2187,7 @@ function refillItems(
     return {
       items,
       nextCursor: cursor,
+      nextTypeCursor: typeCursor,
     };
   }
 
@@ -1950,6 +2222,7 @@ function refillItems(
     return {
       items: nextItems,
       nextCursor: cursor,
+      nextTypeCursor: typeCursor,
     };
   }
 
@@ -1960,7 +2233,7 @@ function refillItems(
   );
   let scanIndex = normalizeIndex(cursor, totalTiles);
   let scanned = 0;
-  let created = 0;
+  let nextTypeCursor = normalizeIndex(typeCursor, enabledTypes.length);
 
   while (nextItems.length < target && scanned < totalTiles) {
     const candidate = pointFromIndex(scanIndex, context);
@@ -1973,7 +2246,7 @@ function refillItems(
       continue;
     }
 
-    const itemType = enabledTypes[(nextItems.length + created) % enabledTypes.length] ?? enabledTypes[0];
+    const itemType = enabledTypes[nextTypeCursor] ?? enabledTypes[0];
     if (itemType === undefined) {
       continue;
     }
@@ -1982,12 +2255,13 @@ function refillItems(
       point: candidate,
       type: itemType,
     });
-    created += 1;
+    nextTypeCursor = normalizeIndex(nextTypeCursor + 1, enabledTypes.length);
   }
 
   return {
     items: nextItems,
     nextCursor: scanIndex,
+    nextTypeCursor,
   };
 }
 
@@ -2282,6 +2556,7 @@ function startRound(
   if (connectedCount < SNAKE_MIN_ROUND_PLAYERS || connectedCount > SNAKE_MAX_ROUND_PLAYERS) {
     return {
       ...syncedLobby,
+      magnetAdjacencyPrimed: {},
       pendingDirections: {},
       publicState: {
         ...syncedLobby.publicState,
@@ -2306,7 +2581,7 @@ function startRound(
         score: 0,
       };
     }
-    const spawn = findFirstSpawn(candidates, occupied, roundContext, snake.playerId);
+    const spawn = findFirstSpawn(candidates, occupied, roundContext, snake.playerId, state.spawnEpoch);
     if (spawn === null) {
       return {
         ...resetSnakeForRound(snake, roundContext.initialLength),
@@ -2343,6 +2618,7 @@ function startRound(
     countdownTicksRemaining: countdownTicks,
     itemRespawnDelayTicksRemaining: 0,
     itemSpawnCursor: 0,
+    magnetAdjacencyPrimed: {},
     pendingDirections: {},
     publicState: {
       ...syncedLobby.publicState,
@@ -2425,6 +2701,7 @@ function stopRound(
   players: GamePlayerSnapshot[],
   context: SnakeContext,
 ): SnakeEngineState {
+  const nextSpawnEpoch = state.spawnEpoch + 1;
   const lobbyGrid = resolveLobbyGridDimensions(players.filter((player) => player.connected).length);
   const lobbyContext = buildEffectiveContext(context, lobbyGrid.width, lobbyGrid.height);
   const mappedSnakes = mapPlayersToSnakeState(state.publicState.snakes, players, lobbyContext).map((snake) => ({
@@ -2432,7 +2709,7 @@ function stopRound(
     coinCount: 0,
     score: 0,
   }));
-  const lobbySnakes = placeLobbySnakes(mappedSnakes, lobbyContext);
+  const lobbySnakes = placeLobbySnakes(mappedSnakes, lobbyContext, nextSpawnEpoch);
 
   return {
     ...state,
@@ -2440,6 +2717,7 @@ function stopRound(
     countdownTicksRemaining: null,
     itemRespawnDelayTicksRemaining: 0,
     itemSpawnCursor: 0,
+    magnetAdjacencyPrimed: {},
     pendingDirections: {},
     publicState: {
       ...state.publicState,
@@ -2469,6 +2747,7 @@ function stopRound(
     roundQuestMeta: cloneSecretQuestMeta(state.roundQuestMeta),
     roundSecretQuestEnabled: false,
     roundTicksRemaining: null,
+    spawnEpoch: nextSpawnEpoch,
   };
 }
 
@@ -2482,7 +2761,7 @@ function syncPlayers(
     const lobbyGrid = resolveLobbyGridDimensions(players.filter((player) => player.connected).length);
     const lobbyContext = buildEffectiveContext(context, lobbyGrid.width, lobbyGrid.height);
     const mappedSnakes = mapPlayersToSnakeState(state.publicState.snakes, players, lobbyContext);
-    const snakes = placeLobbySnakes(mappedSnakes, lobbyContext);
+    const snakes = placeLobbySnakes(mappedSnakes, lobbyContext, state.spawnEpoch);
     const activePlayerIds = new Set(snakes.map((snake) => snake.playerId));
     const nextPendingDirections = Object.fromEntries(
       Object.entries(state.pendingDirections).filter(([playerId]) => activePlayerIds.has(playerId)),
@@ -2586,7 +2865,11 @@ function mapPlayersToSnakeState(
   });
 }
 
-function placeLobbySnakes(snakes: SnakePlayerState[], context: SnakeContext): SnakePlayerState[] {
+function placeLobbySnakes(
+  snakes: SnakePlayerState[],
+  context: SnakeContext,
+  spawnEpoch: number,
+): SnakePlayerState[] {
   const occupied = new Set<string>();
   const candidates = createSpawnCandidates(context);
 
@@ -2595,7 +2878,7 @@ function placeLobbySnakes(snakes: SnakePlayerState[], context: SnakeContext): Sn
       return resetSnakeForRound(snake, context.initialLength);
     }
 
-    const spawn = findFirstSpawn(candidates, occupied, context, snake.playerId);
+    const spawn = findFirstSpawn(candidates, occupied, context, snake.playerId, spawnEpoch);
     if (spawn === null) {
       return resetSnakeForRound(snake, context.initialLength);
     }
@@ -2691,12 +2974,13 @@ function findFirstSpawn(
   occupied: Set<string>,
   context: SnakeContext,
   playerId: string,
+  seedOffset = 0,
 ): SpawnCandidate | null {
   if (candidates.length === 0) {
     return null;
   }
 
-  const offset = hashString(playerId) % candidates.length;
+  const offset = normalizeIndex(hashString(playerId) + seedOffset, candidates.length);
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[(index + offset) % candidates.length];
     if (candidate === undefined) {
@@ -3344,8 +3628,11 @@ function buildReservedItemCells(): SnakePoint[] {
 }
 
 function calculateFoodTarget(width: number, height: number, alivePlayers: number): number {
-  const area = width * height;
-  return Math.max(0, Math.round(SNAKE_FOOD_AREA_FACTOR * area + SNAKE_FOOD_ALIVE_FACTOR * alivePlayers));
+  if (width <= 0 || height <= 0 || alivePlayers <= 0) {
+    return 0;
+  }
+
+  return alivePlayers + SNAKE_FOOD_BASE_TARGET;
 }
 
 function calculateCoinTarget(width: number, height: number, alivePlayers: number): number {
@@ -3547,6 +3834,19 @@ function countAlive(snakes: SnakePlayerState[]): number {
   return snakes.filter((snake) => snake.alive).length;
 }
 
+function cloneMagnetAdjacencyPrimed(
+  primed: Record<string, { coin: boolean; food: boolean }>,
+): Record<string, { coin: boolean; food: boolean }> {
+  return Object.fromEntries(
+    Object.entries(primed).map(([playerId, flags]) => [
+      playerId,
+      {
+        coin: flags.coin,
+        food: flags.food,
+      },
+    ]),
+  );
+}
 function clonePoint(point: SnakePoint): SnakePoint {
   return { ...point };
 }
@@ -3782,36 +4082,4 @@ function pointFromIndex(index: number, context: SnakeContext): SnakePoint {
   const y = Math.floor(normalized / context.gridWidth);
   return { x, y };
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

@@ -202,56 +202,25 @@ export class HostService {
 
     const gameId = snapshot.selectedGame;
 
+    const resetAt = this.now();
+    this.pluginRuntime.handleGameStop();
+    this.sessionStore.setLifecycle("lobby", resetAt);
+    const nextSnapshot = this.syncGameState(resetAt);
+
     if (snapshot.lifecycle === "game_running") {
-      const stopAt = this.now();
-      this.pluginRuntime.handleGameStop();
-      this.sessionStore.setLifecycle("lobby", stopAt);
       this.sendMessage<StopGameMessage>({
         id: randomUUID(),
         reason: "restart_game",
-        sentAt: stopAt,
+        sentAt: resetAt,
         type: "stop_game",
       });
-      this.publishSnapshot(this.syncGameState(stopAt), true);
     }
 
-    const resetAt = this.now();
-    this.publishSnapshot(this.sessionStore.setGameState(null, resetAt), true);
-
-    const selectedManifest =
-      (await this.pluginRuntime.reinitializeActivePlugin()) ??
-      (await this.pluginRuntime.selectPlugin(gameId));
-
-    const readyAt = this.now();
-    this.sessionStore.setLifecycle("lobby", readyAt);
-    const readySnapshot = this.syncGameState(readyAt);
-
-    this.pushDiagnostic("info", "game_restarted", `Restarted ${gameId}.`, {
+    this.pushDiagnostic("info", "game_reset_to_lobby", `Reset ${gameId} to lobby.`, {
       gameId,
       sessionId: snapshot.sessionId ?? "",
     });
-    this.sendMessage<PluginLoadedMessage>({
-      id: randomUUID(),
-      pluginId: gameId,
-      sentAt: readyAt,
-      type: "plugin_loaded",
-      version: selectedManifest.version,
-    });
-    this.publishSnapshot(readySnapshot, true);
-
-    const startAt = this.now();
-    this.sessionStore.setLifecycle("game_running", startAt);
-    this.pluginRuntime.handleGameStart();
-    const runningSnapshot = this.syncGameState(startAt);
-
-    this.sendMessage<StartGameMessage>({
-      id: randomUUID(),
-      pluginId: gameId,
-      seed: startAt,
-      sentAt: startAt,
-      type: "start_game",
-    });
-    this.publishSnapshot(runningSnapshot, true);
+    this.publishSnapshot(nextSnapshot, true);
   }
 
   async selectGame(gameId: string): Promise<void> {

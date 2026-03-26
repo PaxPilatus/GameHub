@@ -408,10 +408,6 @@ async function bootstrap() {
     assertWindowAccess("host:restart-game", windowKind, ["admin", "central"]);
     await runProtectedIpcAction("host:restart-game", windowKind, async () => {
       await activeHostService.restartGame();
-
-      if (activeHostService.getSnapshot().lifecycle === "game_running") {
-        await ensureCentralWindow({ enterFullScreen: true, focus: true });
-      }
     });
   });
   ipcMain.handle("host:restart-session", async (event) => {
@@ -430,7 +426,7 @@ async function bootstrap() {
   });
   ipcMain.handle("host:send-plugin-action", async (event, action, payload) => {
     const windowKind = getSenderWindowKind(event.sender);
-    assertWindowAccess("host:send-plugin-action", windowKind, ["admin"]);
+    assertWindowAccess("host:send-plugin-action", windowKind, ["admin", "central"]);
     await runProtectedIpcAction("host:send-plugin-action", windowKind, async () => {
       const parsed = parsePluginAction(action, payload);
       await activeHostService.sendPluginAction(parsed.action, parsed.payload);
@@ -445,7 +441,7 @@ async function bootstrap() {
   });
   ipcMain.handle("host:start-game", async (event) => {
     const windowKind = getSenderWindowKind(event.sender);
-    assertWindowAccess("host:start-game", windowKind, ["admin"]);
+    assertWindowAccess("host:start-game", windowKind, ["admin", "central"]);
     await runProtectedIpcAction("host:start-game", windowKind, async () => {
       await activeHostService.startGame();
 
@@ -517,6 +513,4 @@ app.on("before-quit", (event) => {
     app.quit();
   });
 });
-
-
 

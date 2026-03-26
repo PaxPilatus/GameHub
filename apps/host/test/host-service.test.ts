@@ -246,15 +246,9 @@ describe("HostService", () => {
     expect(snapshot.sessionId).toBe("session-1");
     expect(snapshot.joinUrl).toBe("https://relay.example/?sessionId=session-1");
     expect(snapshot.selectedGame).toBe("snake");
-    expect(snapshot.lifecycle).toBe("game_running");
-    expect(snapshot.gameState).toEqual({ round: 1, stage: "running" });
-    expect(sentMessages.map((message) => message.type)).toEqual([
-      "game_state",
-      "plugin_loaded",
-      "game_state",
-      "start_game",
-      "game_state",
-    ]);
+    expect(snapshot.lifecycle).toBe("lobby");
+    expect(snapshot.gameState).toEqual({ round: 0, stage: "stopped" });
+    expect(sentMessages.map((message) => message.type)).toEqual(["game_state"]);
   });
 
   it("rejects switching games while a round is running", async () => {
@@ -366,11 +360,8 @@ describe("HostService", () => {
     now = 2_000;
     await service.restartGame();
 
-    expect(sentMessages.map((message) => message.type)).toEqual([
-      "game_state",
-      "plugin_loaded",
-      "start_game",
-    ]);
+    expect(sentMessages.some((message) => message.type === "plugin_loaded")).toBe(false);
+    expect(sentMessages.some((message) => message.type === "start_game")).toBe(false);
     expect(
       service.getDiagnostics().some((event) => event.type === "game_state_too_large"),
     ).toBe(true);

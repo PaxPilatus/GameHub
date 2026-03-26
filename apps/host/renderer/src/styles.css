@@ -888,20 +888,12 @@ tbody td button {
   padding: 0.55rem;
 }
 
+.central-preview-frame .snake-central-toolbar {
+  display: none;
+}
+
 .central-preview-frame .snake-stage-overlay {
-  left: 0.65rem;
-  right: 0.65rem;
-  bottom: 0.65rem;
-  max-width: calc(100% - 1.3rem);
-  padding: 0.45rem 0.55rem;
-}
-
-.central-preview-frame .snake-stage-overlay strong {
-  font-size: 0.9rem;
-}
-
-.central-preview-frame .snake-stage-overlay span {
-  font-size: 0.72rem;
+  display: none;
 }
 
 .central-preview-frame .trivia-central-stage {

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, type ComponentType } from "react";
+import React, { type ComponentType, useEffect, useMemo, useState } from "react";
 
 import type { InputValue } from "@game-hub/protocol";
 import type {
@@ -259,6 +259,7 @@ export function App() {
     hubSession,
     loadedGameId,
     players,
+    pluginActionsEnabled: windowKind === "central",
     pluginLoadError,
     setFatalError,
     snapshot,
@@ -285,10 +286,17 @@ export function App() {
           <div className="toolbar-actions central-toolbar-actions">
             <button
               type="button"
+              disabled={!canStartSelectedGame}
+              onClick={() => invokeHostAction(setFatalError, (hostApi) => hostApi.startGame())}
+            >
+              Start Game
+            </button>
+            <button
+              type="button"
               disabled={!canRestartSelectedGame}
               onClick={() => invokeHostAction(setFatalError, (hostApi) => hostApi.restartGame())}
             >
-              Restart Game
+              New Game
             </button>
             <button
               type="button"
@@ -424,7 +432,7 @@ export function App() {
                 invokeHostAction(setFatalError, (hostApi) => hostApi.restartGame())
               }
             >
-              Restart Game
+              New Game
             </button>
             <button
               type="button"
@@ -508,7 +516,7 @@ export function App() {
             </div>
             <span className="badge">{snapshot.selectedGame ?? "none"}</span>
           </div>
-          <div className="central-preview-frame">{centralView}</div>
+          <div className="central-preview-frame central-preview-readonly">{centralView}</div>
         </section>
 
         <section className="panel diagnostics-panel">
@@ -543,6 +551,7 @@ interface RenderCentralViewParams {
   hubSession: GameCentralProps<Record<string, unknown>>["hubSession"];
   loadedGameId: string | null;
   players: GamePlayerSnapshot[];
+  pluginActionsEnabled: boolean;
   pluginLoadError: string | null;
   setFatalError: (value: string | null) => void;
   snapshot: HostSnapshot;
@@ -555,6 +564,7 @@ function renderCentralView(params: RenderCentralViewParams) {
     hubSession,
     loadedGameId,
     players,
+    pluginActionsEnabled,
     pluginLoadError,
     setFatalError,
     snapshot,
@@ -583,10 +593,10 @@ function renderCentralView(params: RenderCentralViewParams) {
       gameState={snapshot.gameState}
       hubSession={hubSession}
       invokeHostAction={(action: string, payload?: InputValue) => {
-        if (windowKind === "central") {
-          console.warn("[host] central_plugin_action_ignored", {
+        if (!pluginActionsEnabled) {
+          console.warn("[host] preview_plugin_action_ignored", {
             action,
-            reason: "central_window_read_only",
+            reason: "admin_preview_read_only",
           });
           return Promise.resolve();
         }

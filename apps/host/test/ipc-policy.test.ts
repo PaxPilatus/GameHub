@@ -14,6 +14,12 @@ describe("host IPC policy", () => {
     ).toThrow(/not available/);
   });
 
+  it("allows plugin actions from the central window", () => {
+    expect(() =>
+      assertWindowAccess("host:send-plugin-action", "central", ["admin", "central"]),
+    ).not.toThrow();
+  });
+
   it("accepts bounded game and player identifiers", () => {
     expect(parseGameId("snake")).toBe("snake");
     expect(parsePlayerId("player-1")).toBe("player-1");
