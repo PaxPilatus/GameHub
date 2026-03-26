@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { rmSync } from "node:fs";
+import { cpSync, existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 
 const tscBin = resolve("node_modules", "typescript", "bin", "tsc");
@@ -32,6 +32,12 @@ const tscResult = spawnSync(process.execPath, [tscBin, "-b"], {
 
 if (tscResult.status !== 0) {
   process.exit(tscResult.status ?? 1);
+}
+
+const partyRpgAssetsSrc = resolve("plugins", "party-rpg", "src", "assets");
+const partyRpgAssetsDst = resolve("plugins", "party-rpg", "dist", "assets");
+if (existsSync(partyRpgAssetsSrc)) {
+  cpSync(partyRpgAssetsSrc, partyRpgAssetsDst, { recursive: true });
 }
 
 for (const configPath of [mobileViteConfig, hostRendererViteConfig]) {

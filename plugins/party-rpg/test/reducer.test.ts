@@ -239,6 +239,243 @@ describe("party-rpg reducer", () => {
     expect(state.privateAnswers.p1?.length).toBeGreaterThan(5);
   });
 
+  it("does not advance to llm_enrichment until every playerRow has answered (connected flag ignored)", () => {
+    const playersOneDisconnected: GamePlayerSnapshot[] = [
+      { ...PLAYERS[0]!, connected: true },
+      { ...PLAYERS[1]!, connected: false },
+    ];
+    let state = createInitialPartyRpgEngineState([]);
+    state = reducePartyRpgEngineState(
+      state,
+      { players: playersOneDisconnected, seed: 100, type: "game_started" },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      {
+        draft: validDraft(),
+        playerId: "p1",
+        players: playersOneDisconnected,
+        type: "character_submitted",
+      },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      { playerId: "p1", players: playersOneDisconnected, type: "character_ready" },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      {
+        draft: validDraft({
+          chosenName: "Glorp",
+          chosenSlogan: "Laut ist auch Taktik!",
+          classId: "rogue",
+          raceId: "goblin",
+        }),
+        playerId: "p2",
+        players: playersOneDisconnected,
+        type: "character_submitted",
+      },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      { playerId: "p2", players: playersOneDisconnected, type: "character_ready" },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      {
+        characters: state.publicState.characters.map((character) => ({
+          ...character,
+          assetStatus: "ready",
+          summaryShort: "Kurzsummary",
+        })),
+        players: playersOneDisconnected,
+        type: "assets_ready",
+      },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      { players: playersOneDisconnected, type: "skip_intro" },
+      ctx(1_000),
+    );
+    expect(state.publicState.stage).toBe("answer_collection");
+
+    state = reducePartyRpgEngineState(
+      state,
+      {
+        answerText: "Nur eine Antwort von p1.",
+        playerId: "p1",
+        players: playersOneDisconnected,
+        type: "answer_submitted",
+      },
+      ctx(1_000),
+    );
+    expect(state.publicState.stage).toBe("answer_collection");
+    expect(
+      state.publicState.playerRows.filter((r) => r.submittedAnswer).length,
+    ).toBe(1);
+  });
+
+  const PLAYERS_MOD_AND_PLAYER: GamePlayerSnapshot[] = [
+    {
+      connected: true,
+      lastSeen: 1,
+      name: "Mod",
+      playerId: "p1",
+      role: "moderator",
+      team: "A",
+    },
+    {
+      connected: true,
+      lastSeen: 1,
+      name: "Bob",
+      playerId: "p2",
+      role: "player",
+      team: "B",
+    },
+  ];
+
+  it("does not advance to llm_enrichment until moderator and player both answered", () => {
+    let state = createInitialPartyRpgEngineState([]);
+    state = reducePartyRpgEngineState(
+      state,
+      { players: PLAYERS_MOD_AND_PLAYER, seed: 101, type: "game_started" },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      {
+        draft: validDraft(),
+        playerId: "p1",
+        players: PLAYERS_MOD_AND_PLAYER,
+        type: "character_submitted",
+      },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      { playerId: "p1", players: PLAYERS_MOD_AND_PLAYER, type: "character_ready" },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      {
+        draft: validDraft({
+          chosenName: "Glorp",
+          chosenSlogan: "Laut ist auch Taktik!",
+          classId: "rogue",
+          raceId: "goblin",
+        }),
+        playerId: "p2",
+        players: PLAYERS_MOD_AND_PLAYER,
+        type: "character_submitted",
+      },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      { playerId: "p2", players: PLAYERS_MOD_AND_PLAYER, type: "character_ready" },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      {
+        characters: state.publicState.characters.map((character) => ({
+          ...character,
+          assetStatus: "ready",
+          summaryShort: "Kurzsummary",
+        })),
+        players: PLAYERS_MOD_AND_PLAYER,
+        type: "assets_ready",
+      },
+      ctx(1_000),
+    );
+    state = reducePartyRpgEngineState(
+      state,
+      { players: PLAYERS_MOD_AND_PLAYER, type: "skip_intro" },
+      ctx(1_000),
+    );
+    expect(state.publicState.stage).toBe("answer_collection");
+    expect(state.publicState.playerRows.length).toBe(2);
+
+    state = reducePartyRpgEngineState(
+      state,
+      {
+        answerText: "Nur Moderator antwortet.",
+        playerId: "p1",
+        players: PLAYERS_MOD_AND_PLAYER,
+        type: "answer_submitted",
+      },
+      ctx(1_000),
+    );
+    expect(state.publicState.stage).toBe("answer_collection");
+
+    state = reducePartyRpgEngineState(
+      state,
+      {
+        answerText: "Spieler antwortet auch.",
+        playerId: "p2",
+        players: PLAYERS_MOD_AND_PLAYER,
+        type: "answer_submitted",
+      },
+      ctx(1_000),
+    );
+    expect(state.publicState.stage).toBe("llm_enrichment");
+  });
+
+  it("next_reveal advances showcase through all players to judge_deliberation", () => {
+    let state = createInitialPartyRpgEngineState([]);
+    const entry = {
+      audioCueText: null,
+      judgeComment: null,
+      narrationSegmentTexts: ["a1", "a2", "a3", "a4"],
+      narrationText: "Show A",
+      playerId: "p1",
+      ttsReady: false,
+    };
+    state = {
+      ...state,
+      publicState: {
+        ...state.publicState,
+        roundCount: PARTY_ROUND_COUNT,
+        roundIndex: 1,
+        secondsRemaining: 10,
+        showcaseEntries: [
+          entry,
+          {
+            ...entry,
+            narrationSegmentTexts: ["b1", "b2", "b3", "b4"],
+            narrationText: "Show B",
+            playerId: "p2",
+          },
+        ],
+        showcaseIndex: 0,
+        showcaseOrder: ["p1", "p2"],
+        stage: "showcase",
+      },
+    };
+
+    state = reducePartyRpgEngineState(
+      state,
+      { players: PLAYERS, type: "next_reveal" },
+      ctx(0),
+    );
+    expect(state.publicState.stage).toBe("showcase");
+    expect(state.publicState.showcaseIndex).toBe(1);
+
+    state = reducePartyRpgEngineState(
+      state,
+      { players: PLAYERS, type: "next_reveal" },
+      ctx(0),
+    );
+    expect(state.publicState.stage).toBe("judge_deliberation");
+  });
+
   it("applies enrichment_ready and advances showcase order", () => {
     let state = createInitialPartyRpgEngineState([]);
     state = {

@@ -1,4 +1,5 @@
 import type { GamePlayerSnapshot } from "@game-hub/sdk";
+import type { PlayerRole } from "@game-hub/protocol";
 
 import { CHARACTER_CREATION_CONTENT, contentOptionById } from "./character-content.js";
 import { PLAYER_VOICE_A, PLAYER_VOICE_B, normalizePlayerVoiceProfileId } from "./voices.js";
@@ -22,7 +23,12 @@ export const PARTY_SECONDS_JUDGE = 8;
 export const PARTY_SECONDS_ROUND_RESULT = 20;
 export const PARTY_SECONDS_ASSET_FALLBACK = 45;
 
-export const PARTY_POINTS_ROUND_WIN = 3;
+export const PARTY_POINTS_ROUND_WIN = 2;
+
+/** Party-RPG-Mitspieler: erster Join ist oft `moderator`, zweiter `player` — beide spielen mit. */
+export function isPartyRpgParticipantRole(role: PlayerRole): boolean {
+  return role === "player" || role === "moderator";
+}
 
 export type PartyRpgStage =
   | "lobby"
@@ -370,7 +376,7 @@ function syncPlayers(
 
   if (
     synced.publicState.stage === "answer_collection" &&
-    allEligibleAnswered(synced, players)
+    allPlayerRowsSubmitted(synced)
   ) {
     return {
       ...synced,
@@ -397,7 +403,7 @@ function syncPlayerRowsOnly(
   );
 
   const nextRows = players
-    .filter((player) => player.role === "player")
+    .filter((player) => isPartyRpgParticipantRole(player.role))
     .map((player) => {
       const prev = previousRows.get(player.playerId);
       return {
@@ -446,7 +452,7 @@ function buildPlayerRows(
   defaults: { answers: boolean; ready: boolean },
 ): PartyRpgPlayerRow[] {
   return players
-    .filter((player) => player.role === "player")
+    .filter((player) => isPartyRpgParticipantRole(player.role))
     .map((player) => ({
       characterReady: defaults.ready,
       playerId: player.playerId,
@@ -894,7 +900,7 @@ function registerAnswer(
     },
   };
 
-  if (allEligibleAnswered(next, event.players)) {
+  if (allPlayerRowsSubmitted(next)) {
     return {
       ...next,
       publicState: {
@@ -911,26 +917,17 @@ function registerAnswer(
   return next;
 }
 
-function allEligibleAnswered(
-  state: PartyRpgEngineState,
-  players: GamePlayerSnapshot[],
-): boolean {
-  const eligible = listEligiblePlayers(players);
-  if (eligible.length === 0) {
+/** Jede Spieler-Zeile in `playerRows` muss eine Antwort haben (unabhängig von `connected`). */
+function allPlayerRowsSubmitted(state: PartyRpgEngineState): boolean {
+  if (state.publicState.playerRows.length === 0) {
     return false;
   }
-
-  return eligible.every((player) => {
-    const row = state.publicState.playerRows.find(
-      (entry) => entry.playerId === player.playerId,
-    );
-    return row?.submittedAnswer === true;
-  });
+  return state.publicState.playerRows.every((row) => row.submittedAnswer);
 }
 
 function listEligiblePlayers(players: GamePlayerSnapshot[]): GamePlayerSnapshot[] {
   return players.filter(
-    (player) => player.role === "player" && player.connected === true,
+    (player) => isPartyRpgParticipantRole(player.role) && player.connected === true,
   );
 }
 
@@ -1000,15 +997,10 @@ function fillMissingAnswersAndEnrich(
 ): PartyRpgEngineState {
   void context;
   const synced = syncPlayerRowsOnly(state, players);
-  const eligible = listEligiblePlayers(players);
   let answers = { ...synced.privateAnswers };
   const nextRows = synced.publicState.playerRows.map((row) => {
-    const isEligible = eligible.some((p) => p.playerId === row.playerId);
-    if (!isEligible) {
-      return row;
-    }
     if (answers[row.playerId] !== undefined) {
-      return row;
+      return row.submittedAnswer ? row : { ...row, submittedAnswer: true };
     }
     answers = {
       ...answers,
@@ -1179,22 +1171,26 @@ function buildFallbackShowcaseEntries(
   state: PartyRpgEngineState,
   players: GamePlayerSnapshot[],
 ): PartyRpgShowcaseEntry[] {
-  const eligible = listEligiblePlayers(players);
-  const ordered = [...eligible].sort((left, right) =>
-    left.playerId.localeCompare(right.playerId),
+  const byId = new Map(
+    players.map((player) => [player.playerId, player] as const),
   );
+  const ordered = [...state.publicState.playerRows]
+    .slice()
+    .sort((left, right) => left.playerId.localeCompare(right.playerId));
 
-  return ordered.map((player) => {
-    const answer = state.privateAnswers[player.playerId] ?? "(nichts gesagt)";
+  return ordered.map((row) => {
+    const player = byId.get(row.playerId);
+    const displayName = player?.name ?? row.playerId;
+    const answer = state.privateAnswers[row.playerId] ?? "(nichts gesagt)";
     const safe =
       answer.length > 160 ? `${answer.slice(0, 157).trimEnd()}…` : answer;
-    const line = `${player.name} murmelt etwas Ungeheuerliches: „${safe}”`;
+    const line = `${displayName} murmelt etwas Ungeheuerliches: „${safe}”`;
     return {
       audioCueText: null,
       judgeComment: null,
       narrationSegmentTexts: [line, "Hm.", line, "Weiter."],
       narrationText: line,
-      playerId: player.playerId,
+      playerId: row.playerId,
       ttsReady: false,
     };
   });

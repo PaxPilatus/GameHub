@@ -33,6 +33,7 @@ import {
   type PartyRpgSituation,
   type PartyRpgState,
   createInitialPartyRpgEngineState,
+  isPartyRpgParticipantRole,
   parseCharacterDraftPayload,
   reducePartyRpgEngineState,
 } from "./reducer.js";
@@ -52,8 +53,22 @@ import {
 import { renderTtsStubForScript, type TtsRenderResult } from "./runtime/tts-pipeline.js";
 import { buildCharacterStyleProfile } from "./style-profile.js";
 import situations from "./situations.json" with { type: "json" };
+import { PARTY_RPG_TEST_SITUATION_ID } from "./test-assets.js";
 
 const situ: PartyRpgSituation[] = situations as PartyRpgSituation[];
+
+function isTestFlow(): boolean {
+  const v = process.env.PARTY_RPG_TEST_FLOW;
+  return v === "1" || v === "true";
+}
+
+function buildSituationsForContext(): PartyRpgSituation[] {
+  if (!isTestFlow()) {
+    return situ;
+  }
+  const test = situ.find((s) => s.id === PARTY_RPG_TEST_SITUATION_ID);
+  return test !== undefined ? [test] : situ;
+}
 
 let runtimeState = createInitialPartyRpgEngineState([]);
 const processedActionKeys = new Set<string>();
@@ -154,7 +169,76 @@ function applyEngineState(
 }
 
 function buildContext(nowMs: number) {
-  return { nowMs, situations: situ };
+  return { nowMs, situations: buildSituationsForContext() };
+}
+
+function submitRoundAnswerFromHost(
+  api: GameHostApi<PartyRpgState>,
+  playerId: string,
+  answerText: string,
+): void {
+  const now = Date.now();
+  applyEngineState(
+    api,
+    reducePartyRpgEngineState(
+      runtimeState,
+      {
+        answerText,
+        playerId,
+        players: api.getPlayers(),
+        type: "answer_submitted",
+      },
+      buildContext(now),
+    ),
+  );
+  publishPartyHubState(api);
+  scheduleNarrationForPlayer(api, playerId);
+  maybeStartEnrichmentJobs(api);
+}
+
+function maybeInjectTestAnswers(api: GameHostApi<PartyRpgState>): void {
+  if (!isTestFlow()) {
+    return;
+  }
+  if (runtimeState.publicState.stage !== "answer_collection") {
+    return;
+  }
+  const eligible = listRoundPlayersSnapshot(api.getPlayers());
+  for (let i = 0; i < eligible.length; i += 1) {
+    const player = eligible[i];
+    if (player === undefined) {
+      continue;
+    }
+    if (runtimeState.privateAnswers[player.playerId] !== undefined) {
+      continue;
+    }
+    const row = runtimeState.publicState.playerRows.find(
+      (r) => r.playerId === player.playerId,
+    );
+    if (row?.submittedAnswer === true) {
+      continue;
+    }
+    const answerText =
+      i === 0
+        ? "Test-Antwort A: Ich werfe Mehl als Nebelgranate."
+        : i === 1
+          ? "Test-Antwort B: Ich spiele den Wellerman auf dem Bierfass."
+          : `Test-Antwort ${String(i + 1)} (automatisch).`;
+    submitRoundAnswerFromHost(api, player.playerId, answerText);
+  }
+}
+
+function buildTestFlowJudgeComments(
+  showcase: PartyRpgState["showcaseEntries"],
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  showcase.forEach((entry, index) => {
+    out[entry.playerId] =
+      index === 0
+        ? "Test-Judge: Variante A ist absurd genug."
+        : "Test-Judge: Variante B hat Tempo.";
+  });
+  return out;
 }
 
 function maybeStartAssetJobs(api: GameHostApi<PartyRpgState>): void {
@@ -176,7 +260,9 @@ async function runAssetJobs(
   epoch: number,
 ): Promise<void> {
   const gateway = getAiGateway();
-  const players = api.getPlayers().filter((player) => player.role === "player");
+  const players = api
+    .getPlayers()
+    .filter((player) => isPartyRpgParticipantRole(player.role));
 
   const nextChars = [...runtimeState.publicState.characters];
 
@@ -279,11 +365,33 @@ function buildLocalSummary(draft: PartyRpgCharacterDraft): string {
   return `${name}: „${slogan}”`.slice(0, 240);
 }
 
-function listEligibleAnswerPlayers(
+/**
+ * Alle Spieler dieser Runde laut `playerRows` (unabhängig von `connected`).
+ * Namen kommen aus dem Snapshot; fehlende Einträge (z. B. kurz getrennt) nutzen playerId als Label.
+ */
+function listRoundPlayersSnapshot(
   players: GamePlayerSnapshot[],
 ): GamePlayerSnapshot[] {
-  return players
-    .filter((player) => player.role === "player" && player.connected)
+  const byId = new Map(
+    players
+      .filter((player) => isPartyRpgParticipantRole(player.role))
+      .map((player) => [player.playerId, player] as const),
+  );
+  return [...runtimeState.publicState.playerRows]
+    .map((row) => {
+      const snap = byId.get(row.playerId);
+      if (snap !== undefined) {
+        return snap;
+      }
+      return {
+        connected: false,
+        lastSeen: 0,
+        name: row.playerId,
+        playerId: row.playerId,
+        role: "player" as const,
+        team: "A" as const,
+      } satisfies GamePlayerSnapshot;
+    })
     .sort((left, right) => left.playerId.localeCompare(right.playerId));
 }
 
@@ -644,7 +752,7 @@ function scheduleTtsForPlayer(
 function buildShowcaseEntriesFromCaches(
   players: GamePlayerSnapshot[],
 ): PartyRpgState["showcaseEntries"] {
-  const eligible = listEligibleAnswerPlayers(players);
+  const eligible = listRoundPlayersSnapshot(players);
   const roundIndex = runtimeState.publicState.roundIndex;
   return eligible.map((player) => {
     const key = pipelineKey(roundIndex, player.playerId);
@@ -665,7 +773,7 @@ function tryCompleteEnrichmentPhase(api: GameHostApi<PartyRpgState>): void {
     return;
   }
   const players = api.getPlayers();
-  const eligible = listEligibleAnswerPlayers(players);
+  const eligible = listRoundPlayersSnapshot(players);
   const roundIndex = runtimeState.publicState.roundIndex;
   for (const player of eligible) {
     const key = pipelineKey(roundIndex, player.playerId);
@@ -806,7 +914,7 @@ function ensureNarrationsScheduledForRound(api: GameHostApi<PartyRpgState>): voi
     return;
   }
   const players = api.getPlayers();
-  const eligible = listEligibleAnswerPlayers(players);
+  const eligible = listRoundPlayersSnapshot(players);
   for (const player of eligible) {
     scheduleNarrationForPlayer(api, player.playerId);
   }
@@ -908,12 +1016,15 @@ async function runJudgeJob(
   }
 
   if (gateway === null) {
+    const comments = isTestFlow()
+      ? buildTestFlowJudgeComments(showcase)
+      : buildHeuristicComments(showcase);
     applyEngineState(
       api,
       reducePartyRpgEngineState(
         runtimeState,
         {
-          commentsByPlayerId: buildHeuristicComments(showcase),
+          commentsByPlayerId: comments,
           players,
           type: "judge_completed",
           winnerId: pickFallbackWinner(players, showcase),
@@ -944,7 +1055,7 @@ async function runJudgeJob(
 
     const valid = new Set(
       players
-        .filter((player) => player.role === "player")
+        .filter((player) => isPartyRpgParticipantRole(player.role))
         .map((player) => player.playerId),
     );
     const winnerId = valid.has(judge.winnerPlayerId)
@@ -968,12 +1079,15 @@ async function runJudgeJob(
     if (epoch !== pendingJudgeEpoch) {
       return;
     }
+    const comments = isTestFlow()
+      ? buildTestFlowJudgeComments(showcase)
+      : buildHeuristicComments(showcase);
     applyEngineState(
       api,
       reducePartyRpgEngineState(
         runtimeState,
         {
-          commentsByPlayerId: buildHeuristicComments(showcase),
+          commentsByPlayerId: comments,
           players,
           type: "judge_completed",
           winnerId: pickFallbackWinner(players, showcase),
@@ -991,7 +1105,9 @@ function pickFallbackWinner(
   players: GamePlayerSnapshot[],
   showcase: PartyRpgState["showcaseEntries"],
 ): string {
-  const eligible = players.filter((player) => player.role === "player");
+  const eligible = players.filter((player) =>
+    isPartyRpgParticipantRole(player.role),
+  );
   if (eligible.length > 0 && showcase[0] !== undefined) {
     const seed = showcase[0]!.playerId;
     const exists = eligible.some((player) => player.playerId === seed);
@@ -1047,7 +1163,7 @@ function settleMatch(api: GameHostApi<PartyRpgState>): void {
   matchSettled = true;
   const players = api.getPlayers();
   const ordered = [...players]
-    .filter((player) => player.role === "player")
+    .filter((player) => isPartyRpgParticipantRole(player.role))
     .map((player) => ({
       player,
       score:
@@ -1259,7 +1375,10 @@ export const gamePlugin = createGamePlugin<PartyRpgState, unknown>({
         const player = api.getPlayers().find(
           (entry) => entry.playerId === input.playerId,
         );
-        if (player === undefined || player.role !== "player") {
+        if (
+          player === undefined ||
+          !isPartyRpgParticipantRole(player.role)
+        ) {
           return;
         }
 
@@ -1302,7 +1421,10 @@ export const gamePlugin = createGamePlugin<PartyRpgState, unknown>({
         const player = api.getPlayers().find(
           (entry) => entry.playerId === input.playerId,
         );
-        if (player === undefined || player.role !== "player") {
+        if (
+          player === undefined ||
+          !isPartyRpgParticipantRole(player.role)
+        ) {
           return;
         }
 
@@ -1336,7 +1458,10 @@ export const gamePlugin = createGamePlugin<PartyRpgState, unknown>({
         const player = api.getPlayers().find(
           (entry) => entry.playerId === input.playerId,
         );
-        if (player === undefined || player.role !== "player") {
+        if (
+          player === undefined ||
+          !isPartyRpgParticipantRole(player.role)
+        ) {
           return;
         }
 
@@ -1509,6 +1634,8 @@ export const gamePlugin = createGamePlugin<PartyRpgState, unknown>({
       if (before !== runtimeState.publicState.stage) {
         publishPartyHubState(api);
       }
+
+      maybeInjectTestAnswers(api);
 
       maybeStartAssetJobs(api);
       maybeStartEnrichmentJobs(api);

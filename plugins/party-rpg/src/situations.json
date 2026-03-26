@@ -1,5 +1,11 @@
 [
   {
+    "id": "party_rpg_test_flow",
+    "title": "Test: Baeckerei-Chaos",
+    "prompt": "Riesige Bienen haben die Backstube Bummelbach uebernommen. Spieler A und B: beschreibt je eine kurze Aktion (Test-Flow).",
+    "tags": ["test", "absurd"]
+  },
+  {
     "id": "tavern_tax",
     "title": "Stadtwache am Tresen",
     "prompt": "Die Stadtwache verlangt ploetzlich 'Heldensteuer' auf euren kostenlosen Zwergenwein. Wie reagiert ihr?",

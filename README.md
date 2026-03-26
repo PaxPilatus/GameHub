@@ -190,7 +190,14 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 - Respawn laeuft automatisch nach `2.5s`, mit `1.0s` Spawn-Schutz; geschuetzte Snakes koennen keine anderen Snakes toeten und werden durch Snake-Kollisionen nicht getoetet (Self-Collision bleibt toedlich).
 - Kill-Score gibt `+3` nur bei eindeutiger Fremdkoerper-Kollision (klarer Abschneide-Fall).
 - Coinrush spawnt Coins in Hotspot-Wellen (`announce` -> `active`) mit normal/gold Coins (`+1`/`+3`); Hotspots sind sichtbar markierte Spawn-Zonen, keine Pickups.
-- Optionales Event `Secret Quests`: pro Spieler genau 1 geheime Quest pro Runde, einmaliger Reward `+8 Score`; Reveal nur in `game_over`.
+- Optionales Event `Secret Quests`: pro Spieler genau 1 geheime Quest pro Runde, einmaliger Reward `+8 Score`; in `running` wird der aktuelle Quest-Fortschritt als Live-Status angezeigt, Reveal bleibt in `game_over`.
+- Aktive Questtypen (deterministisch vergeben, keine RNG-Pflicht):
+  - `deaths_max_5_round` (maximal 5 Tode; Abschluss am Rundenende)
+  - `food_streak_6_no_death` (6 Food am Stueck ohne Tod)
+  - `kills_6` (6 gueltige Kills)
+  - `drop_food_6` (6 Drop-Food einsammeln)
+  - `wrap_8` (8 Wraps)
+  - `survive_30s_no_item` (30s ohne Item-Pickup)
 - Die Runde endet bei Time-up; Gleichstand ist Draw.
 
 ### Snake Inputs
@@ -223,7 +230,8 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 - `coins`: Liste mit `{ point, type, value }`, wobei `type` `normal | gold` ist
 - `itemSettings`: aktive Lobby-/Countdown-Toggles `{ boost, magnet, shield }`
 - `secretQuestSettings`: Lobby-/Countdown-Toggle `{ enabled }`, in `running` eingefroren
-- `secretQuestRoundSummary`: nur in `game_over` gesetzt, sonst `null`; Liste `{ playerId, questType, completed, bonusAwarded }` pro Spieler mit zugewiesener Quest
+- `secretQuestLive`: in `running` Liste `{ playerId, questType, progressCurrent, progressTarget, status }` mit `status = active | completed | failed`, sonst `null`
+- `secretQuestRoundSummary`: nur in `game_over` gesetzt, sonst `null`; Liste `{ playerId, questType, completed, failed, bonusAwarded }` pro Spieler mit zugewiesener Quest
 - `coinrush`: `null` ausserhalb Coinrush, sonst Wave-/Hotspot-Status `{ phase, phaseTicksRemaining, wave, announcedHotspots[], activeHotspots[] }`
 - `snakes`: Liste aller bekannten Spieler mit `playerId`, `name`, `team`, `connected`, `alive`, `direction`, `head`, `segments[]`, `color`, `score`, `coinCount`, `respawnTicksRemaining`, `spawnProtectionTicksRemaining`, `activeEffects[]`, `speedBank` und `wins`
 
@@ -234,6 +242,10 @@ Turn-basiertes Party-Game: Charaktererstellung, kuratierte Situationen, private 
 - **Charakterphase:** Mobile-Client nutzt einen 5-Schritte-Wizard (Content-Registry, Comedy-Stil-Radar, Name/Slogan-Vorschläge). Profilsenden erfolgt per `submit_character_profile` mit optionalem `confirmReady: true` (Host wendet Speichern und Bereit in einem Schritt an); der separate Action `confirm_character_ready` bleibt kompatibel. Wizard-Zwischenstand kann pro Spieler in `sessionStorage` liegen und wird bei Abschluss oder Stage-Wechsel gelöscht.
 - **Doku:** [docs/party-rpg-spec.md](docs/party-rpg-spec.md) (Stages, Actions, Trust-Grenzen, Fallbacks).
 - **Module:** `plugins/party-rpg`, KI-Client: `packages/ai-gateway` (vom Host eingebunden).
+- **Teilnehmer:** Rollen **`player` und `moderator`** zaehlen als Mitspieler (erster Join ist oft `moderator`, zweiter `player`); beide erscheinen in `playerRows`, Showcase und Judge-Validierung.
+- **Antwortphase:** Wechsel zu `llm_enrichment` erst, wenn **jede** `playerRow` eine Antwort hat (unabhaengig vom `connected`-Flag); bei Timeout fuellen Platzhalter-Antworten fuer alle fehlenden Zeilen. Host-Pipeline (Narration/Showcase/Judge-Eintraege) nutzt dieselbe **playerRows**-Teilnehmerliste; Mobile zeigt in `answer_collection` Szenario-Bild, Titel und Prompt; die Central-Bereitschaftsliste vereinigt Session-Spieler mit `playerRows`.
+- **Punkte:** Rundensieger erhaelt +2 Hub-Punkte (Konstante `PARTY_POINTS_ROUND_WIN`).
+- **Test-Flow (Host):** `PARTY_RPG_TEST_FLOW=1` waehlt die Test-Situation `party_rpg_test_flow` und traegt Antworten fuer alle Spieler automatisch ein (UI-/Pipeline-Test ohne manuelle Eingaben).
 - **Broadcast-State:** Keine rohen Spielerantworten vor dem Showcase; nur freigegebene Texte und Metriken.
 
 ## Neues Plugin Anlegen

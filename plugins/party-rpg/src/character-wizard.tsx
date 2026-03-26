@@ -31,6 +31,8 @@ import {
 import { buildCharacterSummaryPreview } from "./character-summary-preview.js";
 import { PARTY_SUBMIT_CHARACTER, validateDraft } from "./reducer.js";
 import { PLAYER_VOICE_A, PLAYER_VOICE_B } from "./voices.js";
+import { ResilientImg } from "./resilient-img.js";
+import { characterPlaceholderUrls } from "./test-assets.js";
 
 const optionGridStyle: CSSProperties = {
   display: "grid",
@@ -181,6 +183,7 @@ export function CharacterCreationWizard(props: {
   disabled: boolean;
   playerId: string;
   sendInput: GameMobileProps<PartyRpgState>["sendInput"];
+  sortedPlayerIds: readonly string[];
 }): React.JSX.Element {
   const [{ draft, step }, setWizardState] = useState(() =>
     readInitialWizardState(props.playerId, props.character),
@@ -551,10 +554,17 @@ export function CharacterCreationWizard(props: {
             Stilprofil — rein für Lesbarkeit & Spaß, nicht für „Power“.
           </p>
           <div className="party-rpg-portrait-placeholder" role="presentation" style={portraitBoxStyle}>
-            <span aria-hidden className="party-rpg-portrait-emoji">
-              🎭
-            </span>
-            <span className="party-rpg-portrait-caption">Portrait — später KI</span>
+            <ResilientImg
+              alt=""
+              style={{
+                borderRadius: "0.65rem",
+                height: "5rem",
+                objectFit: "cover",
+                width: "5rem",
+              }}
+              urls={characterPlaceholderUrls(props.playerId, props.sortedPlayerIds)}
+            />
+            <span className="party-rpg-portrait-caption">Portrait — Platzhalter</span>
           </div>
           <div className="party-rpg-sheet-header">
             <p className="party-rpg-sheet-name">{draft.chosenName.trim()}</p>

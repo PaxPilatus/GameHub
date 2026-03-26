@@ -1,9 +1,33 @@
 import type { GameMobileProps } from "@game-hub/sdk";
-import React, { useEffect } from "react";
+import React, { useEffect, type CSSProperties } from "react";
 
 import { wizardStorageKey } from "./character-wizard-logic.js";
 import { CharacterCreationWizard } from "./character-wizard.js";
 import { PARTY_SUBMIT_ANSWER, type PartyRpgState } from "./reducer.js";
+import { ResilientImg } from "./resilient-img.js";
+import {
+  characterPlaceholderUrls,
+  scenarioPlaceholderUrls,
+  sortedPlayerIdsFromSnapshots,
+} from "./test-assets.js";
+
+const answerPortraitStyle: CSSProperties = {
+  borderRadius: "0.65rem",
+  display: "block",
+  height: "5rem",
+  marginBottom: "0.5rem",
+  objectFit: "cover",
+  width: "5rem",
+};
+
+const scenarioImageStyle: CSSProperties = {
+  borderRadius: "0.65rem",
+  display: "block",
+  marginBottom: "0.65rem",
+  maxHeight: "12rem",
+  objectFit: "contain",
+  width: "100%",
+};
 
 function asPartyState(value: unknown): PartyRpgState | null {
   if (typeof value !== "object" || value === null) {
@@ -30,6 +54,11 @@ export default function PartyMobileView(props: GameMobileProps<PartyRpgState>) {
       ? undefined
       : state.characters.find((entry) => entry.playerId === props.playerId);
 
+  const sortedPlayerIds = sortedPlayerIdsFromSnapshots(
+    props.players,
+    state.playerRows,
+  );
+
   useEffect(() => {
     if (props.playerId === null || typeof sessionStorage === "undefined") {
       return;
@@ -46,7 +75,7 @@ export default function PartyMobileView(props: GameMobileProps<PartyRpgState>) {
   return (
     <div className="plugin-stack party-rpg-stack">
       <div className="party-rpg-banner">
-        <strong>Party RPG</strong>
+        <strong>Party RPG</strong>{" "}
         <span>
           {state.stage} · Runde {String(state.roundIndex)}/
           {String(state.roundCount)}
@@ -74,17 +103,50 @@ export default function PartyMobileView(props: GameMobileProps<PartyRpgState>) {
             disabled={props.phase !== "game_running"}
             playerId={props.playerId}
             sendInput={props.sendInput}
+            sortedPlayerIds={sortedPlayerIds}
           />
         )
       ) : null}
 
       {state.stage === "answer_collection" && props.playerId !== null ? (
-        <AnswerForm
-          deadlineMs={state.answerDeadlineMs}
-          disabled={props.phase !== "game_running" || row?.submittedAnswer === true}
-          playerId={props.playerId}
-          sendInput={props.sendInput}
-        />
+        row?.submittedAnswer === true ? (
+          <section aria-live="polite" className="party-rpg-form">
+            {state.currentSituation !== null ? (
+              <>
+                <ResilientImg
+                  alt=""
+                  style={scenarioImageStyle}
+                  urls={scenarioPlaceholderUrls()}
+                />
+                <h2 className="party-rpg-step-headline">
+                  {state.currentSituation.title}
+                </h2>
+                <p className="plugin-copy">{state.currentSituation.prompt}</p>
+              </>
+            ) : null}
+            <ResilientImg
+              alt=""
+              style={answerPortraitStyle}
+              urls={characterPlaceholderUrls(props.playerId, sortedPlayerIds)}
+            />
+            <h2 className="party-rpg-step-headline">Antwort gesendet</h2>
+            <p className="plugin-copy">
+              Warte auf die anderen Spieler, bevor es weitergeht.
+            </p>
+          </section>
+        ) : (
+          <AnswerForm
+            currentSituation={state.currentSituation}
+            deadlineMs={state.answerDeadlineMs}
+            disabled={props.phase !== "game_running"}
+            playerId={props.playerId}
+            portraitUrls={characterPlaceholderUrls(
+              props.playerId,
+              sortedPlayerIds,
+            )}
+            sendInput={props.sendInput}
+          />
+        )
       ) : null}
 
       {state.stage === "showcase" && props.playerId !== null ? (
@@ -110,9 +172,11 @@ function readFormField(form: HTMLFormElement, name: string): string {
 }
 
 function AnswerForm(props: {
+  currentSituation: PartyRpgState["currentSituation"];
   deadlineMs: number | null;
   disabled: boolean;
   playerId: string;
+  portraitUrls: readonly string[];
   sendInput: GameMobileProps<PartyRpgState>["sendInput"];
 }): React.JSX.Element {
   return (
@@ -128,6 +192,24 @@ function AnswerForm(props: {
         });
       }}
     >
+      {props.currentSituation !== null ? (
+        <>
+          <ResilientImg
+            alt=""
+            style={scenarioImageStyle}
+            urls={scenarioPlaceholderUrls()}
+          />
+          <h2 className="party-rpg-step-headline">
+            {props.currentSituation.title}
+          </h2>
+          <p className="plugin-copy">{props.currentSituation.prompt}</p>
+        </>
+      ) : null}
+      <ResilientImg
+        alt=""
+        style={answerPortraitStyle}
+        urls={props.portraitUrls}
+      />
       <p className="plugin-stats">
         Deadline:{" "}
         {props.deadlineMs === null

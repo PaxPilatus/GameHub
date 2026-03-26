@@ -13,6 +13,6 @@
     { "path": "../../packages/protocol" },
     { "path": "../../packages/sdk" }
   ],
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.json"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.json", "src/**/*.d.ts"],
   "exclude": ["dist"]
 }
