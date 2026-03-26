@@ -18,7 +18,7 @@ MVP-Monorepo fuer einen lokalen Multiplayer Game Hub mit Windows-Host, Mobile-Br
 - `plugins/debug`: Referenz-Plugin fuer Runtime- und UI-Wiring
 - `plugins/trivia`: Referenzspiel mit 5 Runden, Reveal, Scoreboard und Teamwertung
 - `plugins/snake`: Realtime-Referenzspiel mit autoritativem Tick, Lobby-Board, Countdown-Start, Mobile-HUD-Minimap und Canvas-Central-View
-- `plugins/party-rpg`: Rundenbasiertes Party-Game mit Charakterphase, hostseitiger OpenRouter-Integration (`@game-hub/ai-gateway`), privat oeffentlicher State-Trennung und Hub-Results
+- `plugins/party-rpg`: Rundenbasiertes Party-Game mit Charakterphase (inkl. TTS-Stimmenwahl), hostseitiger OpenRouter-Integration (`@game-hub/ai-gateway`) mit getrennten **Narration-** und **TTS-Job-Queues** (je max. 3 parallel), deterministischer Wurf-/DC-Mechanik pro Antwort, `NarrationScript` mit 4 Segmenten (Spieler/Schiedsrichter abwechselnd), Hintergrund-Judge-Endauswertung sobald alle Narrationen fertig sind, privat/oeffentlicher State-Trennung und Hub-Results
 
 ## Dev Start
 
@@ -74,7 +74,7 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 
 - Join-QR-Code fuer die Session-URL
 - Lobby mit Spielern, Rollen und Teams
-- Admin-Aktionen fuer Moderator, Game-Auswahl, Start, Stop, `Restart Game` und `Restart Session (New Code)`
+- Admin-Aktionen fuer Moderator, Game-Auswahl, Start, Stop, `New Game` und `Restart Session (New Code)`
 - Central Plugin View aus dem aktuell geladenen Plugin plus ein separates Fullscreen-Central-Screen-Fenster beim Spielstart
 - Compact Central-Header mit Session-Meta, Player-Topliste und einer scrollfreien Game-Buehne, die den restlichen Bildschirm fuer das aktive Spiel reserviert
 - Diagnostics mit Connection-Status, Event-Stream und grober Latenzschaetzung
@@ -82,12 +82,12 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 
 ## Session und Restart Verhalten
 
-- `Restart Game` behaelt `sessionId`, `joinUrl`, verbundene Spieler, Moderator und Relay-Verbindung bei.
-- `Restart Game` initialisiert nur das aktuell ausgewaehlte Spiel neu und startet direkt eine frische Runde desselben Spiels.
+- `New Game` behaelt `sessionId`, `joinUrl`, verbundene Spieler, Moderator und Relay-Verbindung bei.
+- `New Game` setzt das aktuell ausgewaehlte Spiel deterministisch auf `lobby` zurueck (kein Auto-Start), damit Host-Settings vor dem naechsten Start angepasst werden koennen.
 - `Restart Session (New Code)` ist weiterhin der harte Reset: neue Session, neue Join-URL, neuer QR-Code.
 - Waehrend der Host gerade eine Session erstellt, zum Relay verbindet oder sauber schliesst, ist `Restart Session (New Code)` bewusst kurz blockiert, damit keine doppelten Lifecycle-Races entstehen.
 - Spielwechsel waehrend `game_running` ist absichtlich blockiert. Stoppe oder restarte zuerst die laufende Runde.
-- Der Central Screen wird beim `Start Game` oder `Restart Game` automatisch in einem zweiten Electron-Fenster geoeffnet und auf Fullscreen gesetzt. Falls ein zweiter Monitor vorhanden ist, wird er bevorzugt dort geoeffnet.
+- Der Central Screen wird beim `Start Game` automatisch in einem zweiten Electron-Fenster geoeffnet und auf Fullscreen gesetzt. Falls ein zweiter Monitor vorhanden ist, wird er bevorzugt dort geoeffnet.
 - Der Admin-Host und der Central Screen koennen beide manuell auf Fullscreen umgeschaltet werden.
 
 ## Relay Betriebsgrenzen
@@ -179,15 +179,17 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 - Der Host ist autoritativ und verarbeitet pro Player die zuletzt eingegangene Richtungs-Eingabe vor dem naechsten Tick.
 - Bereits in der Snake-Lobby werden alle verbundenen Spieler direkt auf dem Brett platziert und mit Name plus Farbe angezeigt.
 - Beim Start beginnt die Runde ueber einen synchronen Countdown `3 -> 2 -> 1 -> GO`.
+- Im Central-Fenster sind Mode/Item/Quest-Toggles steuerbar; die Admin-Central-Preview ist reine Spielfeldvorschau.
 - Mode `standard`: zeitbasierte Runde mit `180s`, Sieger via Top-Score.
 - Mode `coinrush`: zeitbasierte Runde mit `120s`, Sieger ausschliesslich via `coinCount`; Food/Items/Respawn bleiben aktiv.
 - Die Mapgroesse und das aktive Round-Roster werden beim Start eingefroren; neue Joins waehrend `countdown`, `running` oder `game_over` zaehlen erst fuer die naechste Runde.
 - Namen bleiben nur in `lobby` und `countdown` sichtbar; waehrend `running` verschwindet das Labeling wieder fuer ein klares Spielfeld.
 - Movement nutzt Wrap-around statt Wandtod.
+- Food-Zielmenge im Running-State ist fix `alivePlayers + 2`.
 - Food gibt immer `+1` Score und `+1` Laenge; Death-Drops werden bei Elimination als eigenes Drop-Food verteilt.
 - Respawn laeuft automatisch nach `2.5s`, mit `1.0s` Spawn-Schutz; geschuetzte Snakes koennen keine anderen Snakes toeten und werden durch Snake-Kollisionen nicht getoetet (Self-Collision bleibt toedlich).
 - Kill-Score gibt `+3` nur bei eindeutiger Fremdkoerper-Kollision (klarer Abschneide-Fall).
-- Coinrush spawnt Coins in Hotspot-Wellen (`announce` -> `active`) mit normal/gold Coins (`+1`/`+3`).
+- Coinrush spawnt Coins in Hotspot-Wellen (`announce` -> `active`) mit normal/gold Coins (`+1`/`+3`); Hotspots sind sichtbar markierte Spawn-Zonen, keine Pickups.
 - Optionales Event `Secret Quests`: pro Spieler genau 1 geheime Quest pro Runde, einmaliger Reward `+8 Score`; Reveal nur in `game_over`.
 - Die Runde endet bei Time-up; Gleichstand ist Draw.
 
@@ -198,7 +200,7 @@ Die Host-App erstellt beim Start automatisch eine neue Relay-Session, verbindet 
 - `snake_items_config`: Host-Action mit partieller Payload `{ boost?: boolean, magnet?: boolean, shield?: boolean }`; nur in `lobby` und `countdown` wirksam, fuer `running` eingefroren
 - `snake_mode_config`: Host-Action mit Payload `{ mode: "standard" | "coinrush" }`; nur in `lobby` und `countdown` wirksam, fuer `running` eingefroren
 - `snake_secret_quests_config`: Host-Action mit Payload `{ enabled: boolean }`; nur in `lobby` und `countdown` wirksam, fuer `running` eingefroren
-- `restart`: Host-Action ohne Payload. Startet aus dem Central-Screen sofort eine neue Runde.
+- `restart`: Host-Action ohne Payload. Stoppt die laufende Runde und setzt Snake zurueck in die Lobby (`New Game`, kein Auto-Start).
 
 ### Snake Broadcast State
 
@@ -337,19 +339,4 @@ Praktisches Muster fuer neue Realtime-Plugins:
 - `corepack pnpm lint`
 
 `pnpm build` erzeugt die TypeScript-Artefakte sowie die Vite-Builds fuer `apps/mobile/dist` und `apps/host/dist/renderer`.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

@@ -30,6 +30,7 @@ import {
 } from "./identity-suggestions.js";
 import { buildCharacterSummaryPreview } from "./character-summary-preview.js";
 import { PARTY_SUBMIT_CHARACTER, validateDraft } from "./reducer.js";
+import { PLAYER_VOICE_A, PLAYER_VOICE_B } from "./voices.js";
 
 const optionGridStyle: CSSProperties = {
   display: "grid",
@@ -93,6 +94,7 @@ function emptyDraft(): CharacterProfileDraft {
     raceId: null,
     signatureObjectId: null,
     startItemId: null,
+    voiceProfileId: null,
   };
 }
 
@@ -262,6 +264,7 @@ export function CharacterCreationWizard(props: {
       confirmReady: true,
       flawId: draft.flawId ?? "",
       jobId: draft.jobId ?? "",
+      voiceProfileId: draft.voiceProfileId ?? "",
       quirkId: draft.quirkId ?? "",
       raceId: draft.raceId ?? "",
       signatureObjectId: draft.signatureObjectId ?? "",
@@ -608,6 +611,37 @@ export function CharacterCreationWizard(props: {
             <h3 className="party-rpg-field-label">Vorschau</h3>
             <p className="plugin-copy">{summaryPreview}</p>
           </section>
+          <h3 className="party-rpg-field-label">Stimme (Nur TTS)</h3>
+          <p className="plugin-copy party-rpg-hint-muted" style={{ fontSize: "0.85rem" }}>
+            Beeinflusst nur die Vorlese-Stimme, nicht die Mechanik.
+          </p>
+          <div className="party-rpg-chip-row" style={chipRowStyle}>
+            <button
+              className="party-rpg-chip"
+              disabled={props.disabled}
+              onClick={() => {
+                updateDraft({ voiceProfileId: PLAYER_VOICE_A });
+              }}
+              type="button"
+            >
+              Stimme A
+            </button>
+            <button
+              className="party-rpg-chip"
+              disabled={props.disabled}
+              onClick={() => {
+                updateDraft({ voiceProfileId: PLAYER_VOICE_B });
+              }}
+              type="button"
+            >
+              Stimme B
+            </button>
+          </div>
+          {draft.voiceProfileId !== null ? (
+            <p className="plugin-stats" style={{ fontSize: "0.8rem" }}>
+              Gewählt: {draft.voiceProfileId === PLAYER_VOICE_A ? "A" : "B"}
+            </p>
+          ) : null}
           <div className="party-rpg-wizard-nav" style={wizardNavStyle}>
             <button
               className="party-rpg-button secondary"

@@ -7,6 +7,7 @@ import {
   WIZARD_STORAGE_VERSION,
 } from "../src/character-wizard-logic.js";
 import type { CharacterProfileDraft } from "../src/character-models.js";
+import { PLAYER_VOICE_A } from "../src/voices.js";
 
 const fullDraft: CharacterProfileDraft = {
   backgroundId: "folk_hero",
@@ -19,6 +20,7 @@ const fullDraft: CharacterProfileDraft = {
   raceId: "human",
   signatureObjectId: "ominous_notebook",
   startItemId: "tent_hole_in_roof",
+  voiceProfileId: PLAYER_VOICE_A,
 };
 
 describe("character-wizard-logic", () => {

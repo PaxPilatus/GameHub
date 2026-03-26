@@ -9,10 +9,12 @@ export {
   CharacterSummarySchema,
   JudgeOutputSchema,
   NarrationOutputSchema,
+  NarrationScriptSchema,
   extractJsonObject,
   type CharacterSummaryOutput,
   type JudgeOutput,
   type NarrationOutput,
+  type NarrationScript,
 } from "./ai-schemas.js";
 export {
   createOpenRouterClient,

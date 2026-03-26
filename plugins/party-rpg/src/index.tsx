@@ -1,8 +1,10 @@
 import type { InputMessage } from "@game-hub/protocol";
 import {
   createAiGateway,
+  createStaleGuard,
   type AiGateway,
   type AiGatewayConfig,
+  type NarrationScript,
 } from "@game-hub/ai-gateway";
 import {
   createGamePlugin,
@@ -34,6 +36,21 @@ import {
   parseCharacterDraftPayload,
   reducePartyRpgEngineState,
 } from "./reducer.js";
+import {
+  computeFallbackMechanicsResolution,
+  computeMechanicsResolution,
+  type MechanicsResolution,
+} from "./mechanics.js";
+import { createLimitedParallelQueue } from "./runtime/job-queue.js";
+import {
+  buildFallbackNarrationScript,
+  mechanicsToJson,
+  roundContextToJson,
+  showcaseEntryFromNarrationScript,
+  styleProfileToJson,
+} from "./runtime/narration-pipeline.js";
+import { renderTtsStubForScript, type TtsRenderResult } from "./runtime/tts-pipeline.js";
+import { buildCharacterStyleProfile } from "./style-profile.js";
 import situations from "./situations.json" with { type: "json" };
 
 const situ: PartyRpgSituation[] = situations as PartyRpgSituation[];
@@ -44,8 +61,59 @@ let matchSettled = false;
 let lastRoundScored = -1;
 let aiGateway: AiGateway | null = null;
 let pendingAssetEpoch = 0;
-let pendingEnrichmentEpoch = 0;
 let pendingJudgeEpoch = 0;
+
+const narrationQueue = createLimitedParallelQueue(3);
+const ttsQueue = createLimitedParallelQueue(3);
+
+let pipelineSessionEpoch = 0;
+const mechanicsCache = new Map<string, MechanicsResolution>();
+const narrationScriptCache = new Map<string, NarrationScript>();
+const ttsManifestCache = new Map<string, TtsRenderResult>();
+const narrationScheduledKeys = new Set<string>();
+let judgeKickoffDoneForRound = false;
+
+type JudgeEarlyResult = {
+  commentsByPlayerId: Record<string, string>;
+  pipelineSessionEpoch: number;
+  roundIndex: number;
+  winnerPlayerId: string;
+};
+
+let judgeEarlyResult: JudgeEarlyResult | null = null;
+
+function pipelineKey(roundIndex: number, playerId: string): string {
+  return `${String(roundIndex)}:${playerId}`;
+}
+
+function bumpPipelineSessionEpoch(): void {
+  pipelineSessionEpoch += 1;
+  mechanicsCache.clear();
+  narrationScriptCache.clear();
+  ttsManifestCache.clear();
+  narrationScheduledKeys.clear();
+  judgeEarlyResult = null;
+  judgeKickoffDoneForRound = false;
+  narrationQueue.invalidateQueued(() => true);
+  ttsQueue.invalidateQueued(() => true);
+}
+
+function clearPipelineForNewRound(): void {
+  mechanicsCache.clear();
+  narrationScriptCache.clear();
+  ttsManifestCache.clear();
+  narrationScheduledKeys.clear();
+  judgeEarlyResult = null;
+  judgeKickoffDoneForRound = false;
+  narrationQueue.invalidateQueued(() => true);
+  ttsQueue.invalidateQueued(() => true);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 function getAiGateway(): AiGateway | null {
   const apiKey = process.env.OPENROUTER_API_KEY;
@@ -77,8 +145,12 @@ function applyEngineState(
   api: GameHostApi<PartyRpgState>,
   next: PartyRpgEngineState,
 ): void {
+  const prevRound = runtimeState.publicState.roundIndex;
   runtimeState = next;
   api.setState(next.publicState);
+  if (next.publicState.roundIndex !== prevRound) {
+    clearPipelineForNewRound();
+  }
 }
 
 function buildContext(nowMs: number) {
@@ -207,110 +279,409 @@ function buildLocalSummary(draft: PartyRpgCharacterDraft): string {
   return `${name}: „${slogan}”`.slice(0, 240);
 }
 
-function maybeStartEnrichmentJobs(api: GameHostApi<PartyRpgState>): void {
+function listEligibleAnswerPlayers(
+  players: GamePlayerSnapshot[],
+): GamePlayerSnapshot[] {
+  return players
+    .filter((player) => player.role === "player" && player.connected)
+    .sort((left, right) => left.playerId.localeCompare(right.playerId));
+}
+
+function getOrComputeMechanics(
+  playerId: string,
+  answerText: string,
+): MechanicsResolution {
+  const roundIndex = runtimeState.publicState.roundIndex;
+  const key = pipelineKey(roundIndex, playerId);
+  const existing = mechanicsCache.get(key);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const draft = runtimeState.characterDraftByPlayer[playerId];
+  const situation = runtimeState.publicState.currentSituation;
+  const tags = situation?.tags ?? [];
+  const mech =
+    draft !== undefined
+      ? computeMechanicsResolution({
+          answerText,
+          draft,
+          playerId,
+          roundIndex,
+          sessionSeed: runtimeState.publicState.sessionSeed,
+          situationTags: tags,
+        })
+      : computeFallbackMechanicsResolution({
+          answerText,
+          playerId,
+          roundIndex,
+          sessionSeed: runtimeState.publicState.sessionSeed,
+        });
+  mechanicsCache.set(key, mech);
+  return mech;
+}
+
+function scheduleNarrationForPlayer(
+  api: GameHostApi<PartyRpgState>,
+  playerId: string,
+): void {
+  const stage = runtimeState.publicState.stage;
+  if (stage !== "answer_collection" && stage !== "llm_enrichment") {
+    return;
+  }
+  const answer = runtimeState.privateAnswers[playerId];
+  if (answer === undefined || answer.trim() === "") {
+    return;
+  }
+  const roundIndex = runtimeState.publicState.roundIndex;
+  const key = pipelineKey(roundIndex, playerId);
+  if (narrationScriptCache.has(key) || narrationScheduledKeys.has(key)) {
+    return;
+  }
+  narrationScheduledKeys.add(key);
+
+  applyEngineState(
+    api,
+    reducePartyRpgEngineState(
+      runtimeState,
+      {
+        playerId,
+        players: api.getPlayers(),
+        status: "queued",
+        type: "pipeline_narration_status",
+      },
+      buildContext(Date.now()),
+    ),
+  );
+
+  const sessionEp = pipelineSessionEpoch;
+  const roundAtSchedule = roundIndex;
+
+  narrationQueue.enqueue({
+    id: `narr:${String(roundAtSchedule)}:${playerId}`,
+    isValid: () =>
+      sessionEp === pipelineSessionEpoch &&
+      runtimeState.publicState.roundIndex === roundAtSchedule &&
+      (runtimeState.publicState.stage === "answer_collection" ||
+        runtimeState.publicState.stage === "llm_enrichment"),
+    run: async () => {
+      await runSingleNarrationJob(api, playerId, sessionEp, roundAtSchedule, key, answer);
+    },
+  });
+}
+
+async function runSingleNarrationJob(
+  api: GameHostApi<PartyRpgState>,
+  playerId: string,
+  sessionEp: number,
+  roundAtSchedule: number,
+  cacheKey: string,
+  answer: string,
+): Promise<void> {
+  if (sessionEp !== pipelineSessionEpoch) {
+    return;
+  }
+
+  applyEngineState(
+    api,
+    reducePartyRpgEngineState(
+      runtimeState,
+      {
+        playerId,
+        players: api.getPlayers(),
+        status: "running",
+        type: "pipeline_narration_status",
+      },
+      buildContext(Date.now()),
+    ),
+  );
+
+  const gateway = getAiGateway();
+  const situation = runtimeState.publicState.currentSituation;
+  const player = api.getPlayers().find((entry) => entry.playerId === playerId);
+  const draft = runtimeState.characterDraftByPlayer[playerId];
+  const character = runtimeState.publicState.characters.find(
+    (entry) => entry.playerId === playerId,
+  );
+  const playerName = player?.name ?? playerId;
+  const mech = getOrComputeMechanics(playerId, answer);
+  const sessionId = String(runtimeState.publicState.sessionSeed);
+  const style = draft !== undefined ? buildCharacterStyleProfile(draft) : buildCharacterStyleProfile({
+    backgroundId: null,
+    chosenName: playerName,
+    chosenSlogan: character?.slogan ?? "",
+    classId: null,
+    flawId: null,
+    jobId: null,
+    quirkId: null,
+    raceId: null,
+    signatureObjectId: null,
+    startItemId: null,
+    voiceProfileId: character?.voiceProfileId ?? null,
+  });
+
+  let script: NarrationScript = buildFallbackNarrationScript({
+    answerText: answer,
+    mechanics: mech,
+    playerId,
+    playerName,
+    roundIndex: roundAtSchedule,
+    sessionId,
+  });
+
+  if (gateway !== null && situation !== null) {
+    const mechanicsJson = mechanicsToJson({
+      mechanics: mech,
+      playerId,
+      roundIndex: roundAtSchedule,
+      sessionId,
+    });
+    try {
+      const llmScript = await gateway.generateNarrationScript({
+        answerText: answer,
+        characterStyleJson: styleProfileToJson(style),
+        mechanicsJson,
+        playerId,
+        roundContextJson: roundContextToJson({
+          situationId: situation.id,
+          situationPrompt: situation.prompt,
+          situationTags: situation.tags,
+          situationTitle: situation.title,
+        }),
+        roundIndex: roundAtSchedule,
+        sessionId,
+        stale: createStaleGuard(() => pipelineSessionEpoch),
+      });
+      if (llmScript.playerId !== playerId || llmScript.roundIndex !== roundAtSchedule) {
+        throw new Error("narration_script_mismatch");
+      }
+      script = {
+        ...llmScript,
+        outcome: mech.outcome,
+        playerId,
+        roundIndex: roundAtSchedule,
+        rollSummary: mech.rollSummary,
+        sessionId,
+      };
+    } catch (firstErr) {
+      if (
+        firstErr instanceof Error &&
+        firstErr.message === "ai_stale_guard"
+      ) {
+        return;
+      }
+      try {
+        await sleep(320);
+        const repaired = await gateway.repairNarrationScript({
+          brokenJsonText: String(firstErr),
+          mechanicsJson,
+          stale: createStaleGuard(() => pipelineSessionEpoch),
+        });
+        if (
+          repaired.playerId !== playerId ||
+          repaired.roundIndex !== roundAtSchedule
+        ) {
+          script = buildFallbackNarrationScript({
+            answerText: answer,
+            mechanics: mech,
+            playerId,
+            playerName,
+            roundIndex: roundAtSchedule,
+            sessionId,
+          });
+        } else {
+          script = {
+            ...repaired,
+            outcome: mech.outcome,
+            playerId,
+            roundIndex: roundAtSchedule,
+            rollSummary: mech.rollSummary,
+            sessionId,
+          };
+        }
+      } catch {
+        await sleep(800);
+        script = buildFallbackNarrationScript({
+          answerText: answer,
+          mechanics: mech,
+          playerId,
+          playerName,
+          roundIndex: roundAtSchedule,
+          sessionId,
+        });
+      }
+    }
+  }
+
+  if (sessionEp !== pipelineSessionEpoch || runtimeState.publicState.roundIndex !== roundAtSchedule) {
+    return;
+  }
+
+  narrationScriptCache.set(cacheKey, script);
+
+  applyEngineState(
+    api,
+    reducePartyRpgEngineState(
+      runtimeState,
+      {
+        playerId,
+        players: api.getPlayers(),
+        status: "completed",
+        type: "pipeline_narration_status",
+      },
+      buildContext(Date.now()),
+    ),
+  );
+
+  scheduleTtsForPlayer(api, playerId, script, sessionEp, roundAtSchedule, cacheKey);
+  tryCompleteEnrichmentPhase(api);
+}
+
+function scheduleTtsForPlayer(
+  api: GameHostApi<PartyRpgState>,
+  playerId: string,
+  script: NarrationScript,
+  sessionEp: number,
+  roundAtSchedule: number,
+  cacheKey: string,
+): void {
+  const character = runtimeState.publicState.characters.find(
+    (entry) => entry.playerId === playerId,
+  );
+  const playerVoice = character?.voiceProfileId ?? "player_voice_a";
+
+  applyEngineState(
+    api,
+    reducePartyRpgEngineState(
+      runtimeState,
+      {
+        playerId,
+        players: api.getPlayers(),
+        status: "queued",
+        type: "pipeline_tts_status",
+      },
+      buildContext(Date.now()),
+    ),
+  );
+
+  ttsQueue.enqueue({
+    id: `tts:${String(roundAtSchedule)}:${playerId}`,
+    isValid: () =>
+      sessionEp === pipelineSessionEpoch &&
+      runtimeState.publicState.roundIndex === roundAtSchedule,
+    run: async () => {
+      if (sessionEp !== pipelineSessionEpoch) {
+        return;
+      }
+      applyEngineState(
+        api,
+        reducePartyRpgEngineState(
+          runtimeState,
+          {
+            playerId,
+            players: api.getPlayers(),
+            status: "running",
+            type: "pipeline_tts_status",
+          },
+          buildContext(Date.now()),
+        ),
+      );
+      try {
+        const manifest = await renderTtsStubForScript({
+          narrationScript: script,
+          playerVoiceProfileId: playerVoice,
+          roundIndex: roundAtSchedule,
+        });
+        if (sessionEp !== pipelineSessionEpoch || runtimeState.publicState.roundIndex !== roundAtSchedule) {
+          return;
+        }
+        ttsManifestCache.set(cacheKey, manifest);
+        applyEngineState(
+          api,
+          reducePartyRpgEngineState(
+            runtimeState,
+            {
+              playerId,
+              players: api.getPlayers(),
+              status: "completed",
+              type: "pipeline_tts_status",
+            },
+            buildContext(Date.now()),
+          ),
+        );
+        if (runtimeState.publicState.stage === "showcase") {
+          applyEngineState(
+            api,
+            reducePartyRpgEngineState(
+              runtimeState,
+              {
+                playerId,
+                players: api.getPlayers(),
+                type: "showcase_tts_ready",
+              },
+              buildContext(Date.now()),
+            ),
+          );
+        }
+      } catch {
+        applyEngineState(
+          api,
+          reducePartyRpgEngineState(
+            runtimeState,
+            {
+              playerId,
+              players: api.getPlayers(),
+              status: "failed",
+              type: "pipeline_tts_status",
+            },
+            buildContext(Date.now()),
+          ),
+        );
+      }
+    },
+  });
+}
+
+function buildShowcaseEntriesFromCaches(
+  players: GamePlayerSnapshot[],
+): PartyRpgState["showcaseEntries"] {
+  const eligible = listEligibleAnswerPlayers(players);
+  const roundIndex = runtimeState.publicState.roundIndex;
+  return eligible.map((player) => {
+    const key = pipelineKey(roundIndex, player.playerId);
+    const script = narrationScriptCache.get(key);
+    if (script === undefined) {
+      throw new Error("party_rpg_missing_narration_script");
+    }
+    const ttsReady = ttsManifestCache.has(key);
+    return showcaseEntryFromNarrationScript(script, ttsReady);
+  });
+}
+
+function tryCompleteEnrichmentPhase(api: GameHostApi<PartyRpgState>): void {
   if (runtimeState.publicState.stage !== "llm_enrichment") {
     return;
   }
   if (runtimeState.enrichmentResolved) {
     return;
   }
-  if (runtimeState.enrichmentStarted) {
-    return;
-  }
-
-  runtimeState = { ...runtimeState, enrichmentStarted: true };
-  const epoch = (pendingEnrichmentEpoch += 1);
-  void runEnrichmentJobs(api, epoch);
-}
-
-async function runEnrichmentJobs(
-  api: GameHostApi<PartyRpgState>,
-  epoch: number,
-): Promise<void> {
-  const gateway = getAiGateway();
   const players = api.getPlayers();
-  const situation = runtimeState.publicState.currentSituation;
-
-  if (situation === null) {
-    return;
-  }
-
-  const eligible = players
-    .filter((player) => player.role === "player" && player.connected)
-    .sort((left, right) => left.playerId.localeCompare(right.playerId));
-
-  const entries: Array<{
-    audioCueText: string | null;
-    judgeComment: null;
-    narrationText: string;
-    playerId: string;
-  }> = [];
-
+  const eligible = listEligibleAnswerPlayers(players);
+  const roundIndex = runtimeState.publicState.roundIndex;
   for (const player of eligible) {
-    if (epoch !== pendingEnrichmentEpoch) {
+    const key = pipelineKey(roundIndex, player.playerId);
+    if (!narrationScriptCache.has(key)) {
       return;
     }
-
-    const answer = runtimeState.privateAnswers[player.playerId] ?? "";
-    const character = runtimeState.publicState.characters.find(
-      (entry) => entry.playerId === player.playerId,
-    );
-    const summary =
-      character?.summaryShort?.trim() !== ""
-        ? character!.summaryShort
-        : player.name;
-
-    if (gateway === null) {
-      const safe =
-        answer.length > 180 ? `${answer.slice(0, 177).trimEnd()}…` : answer;
-      entries.push({
-        audioCueText: null,
-        judgeComment: null,
-        narrationText: `${player.name} sagt leise: „${safe}”`,
-        playerId: player.playerId,
-      });
-      continue;
-    }
-
-    try {
-      const narration = await gateway.generateNarration({
-        answerText: answer,
-        characterSummary: summary,
-        situationPrompt: situation.prompt,
-      });
-      if (epoch !== pendingEnrichmentEpoch) {
-        return;
-      }
-      entries.push({
-        audioCueText: narration.audioCueText ?? null,
-        judgeComment: null,
-        narrationText: narration.narrationText.slice(0, 380),
-        playerId: player.playerId,
-      });
-    } catch {
-      if (epoch !== pendingEnrichmentEpoch) {
-        return;
-      }
-      const safe =
-        answer.length > 180 ? `${answer.slice(0, 177).trimEnd()}…` : answer;
-      entries.push({
-        audioCueText: null,
-        judgeComment: null,
-        narrationText: `${player.name} bleibt dramatisch: „${safe}”`,
-        playerId: player.playerId,
-      });
-    }
   }
-
-  if (epoch !== pendingEnrichmentEpoch) {
+  if (eligible.length === 0) {
     return;
   }
 
-  if (
-    runtimeState.publicState.stage !== "llm_enrichment" ||
-    runtimeState.enrichmentResolved === true
-  ) {
-    return;
+  const entries = buildShowcaseEntriesFromCaches(players);
+
+  if (!judgeKickoffDoneForRound) {
+    judgeKickoffDoneForRound = true;
+    void runJudgeEarlyEvaluation(api, entries);
   }
 
   applyEngineState(
@@ -328,11 +699,175 @@ async function runEnrichmentJobs(
   publishPartyHubState(api);
 }
 
+async function runJudgeEarlyEvaluation(
+  api: GameHostApi<PartyRpgState>,
+  entries: PartyRpgState["showcaseEntries"],
+): Promise<void> {
+  const gateway = getAiGateway();
+  const situation = runtimeState.publicState.currentSituation;
+  const players = api.getPlayers();
+  const sessionEp = pipelineSessionEpoch;
+  const roundAt = runtimeState.publicState.roundIndex;
+
+  applyEngineState(
+    api,
+    reducePartyRpgEngineState(
+      runtimeState,
+      {
+        players,
+        status: "running",
+        type: "pipeline_judge_status",
+      },
+      buildContext(Date.now()),
+    ),
+  );
+
+  if (situation === null || gateway === null) {
+    applyEngineState(
+      api,
+      reducePartyRpgEngineState(
+        runtimeState,
+        {
+          players,
+          status: "idle",
+          type: "pipeline_judge_status",
+        },
+        buildContext(Date.now()),
+      ),
+    );
+    return;
+  }
+
+  try {
+    const judge = await gateway.judgeRound({
+      entries: entries.map((entry) => ({
+        narrationText: entry.narrationText,
+        playerId: entry.playerId,
+        playerName:
+          players.find((player) => player.playerId === entry.playerId)?.name ??
+          entry.playerId,
+      })),
+      situationPrompt: situation.prompt,
+      stale: createStaleGuard(() => pipelineSessionEpoch),
+    });
+
+    if (sessionEp !== pipelineSessionEpoch || runtimeState.publicState.roundIndex !== roundAt) {
+      return;
+    }
+
+    const valid = new Set(
+      players.filter((player) => player.role === "player").map((player) => player.playerId),
+    );
+    const winnerPlayerId = valid.has(judge.winnerPlayerId)
+      ? judge.winnerPlayerId
+      : pickFallbackWinner(players, entries);
+
+    judgeEarlyResult = {
+      commentsByPlayerId: judge.commentsByPlayerId,
+      pipelineSessionEpoch: sessionEp,
+      roundIndex: roundAt,
+      winnerPlayerId,
+    };
+
+    applyEngineState(
+      api,
+      reducePartyRpgEngineState(
+        runtimeState,
+        {
+          players,
+          status: "completed",
+          type: "pipeline_judge_status",
+        },
+        buildContext(Date.now()),
+      ),
+    );
+  } catch {
+    if (sessionEp !== pipelineSessionEpoch) {
+      return;
+    }
+    judgeEarlyResult = null;
+    applyEngineState(
+      api,
+      reducePartyRpgEngineState(
+        runtimeState,
+        {
+          players,
+          status: "failed",
+          type: "pipeline_judge_status",
+        },
+        buildContext(Date.now()),
+      ),
+    );
+  }
+}
+
+function ensureNarrationsScheduledForRound(api: GameHostApi<PartyRpgState>): void {
+  if (runtimeState.publicState.stage !== "llm_enrichment") {
+    return;
+  }
+  const players = api.getPlayers();
+  const eligible = listEligibleAnswerPlayers(players);
+  for (const player of eligible) {
+    scheduleNarrationForPlayer(api, player.playerId);
+  }
+  tryCompleteEnrichmentPhase(api);
+}
+
+function maybeStartEnrichmentJobs(api: GameHostApi<PartyRpgState>): void {
+  if (runtimeState.publicState.stage !== "llm_enrichment") {
+    return;
+  }
+  if (runtimeState.enrichmentResolved) {
+    return;
+  }
+  if (!runtimeState.enrichmentStarted) {
+    runtimeState = { ...runtimeState, enrichmentStarted: true };
+  }
+  ensureNarrationsScheduledForRound(api);
+}
+
+function tryConsumeJudgeEarly(api: GameHostApi<PartyRpgState>): boolean {
+  const early = judgeEarlyResult;
+  if (early === null) {
+    return false;
+  }
+  if (
+    early.pipelineSessionEpoch !== pipelineSessionEpoch ||
+    early.roundIndex !== runtimeState.publicState.roundIndex
+  ) {
+    return false;
+  }
+  judgeEarlyResult = null;
+  const players = api.getPlayers();
+  applyEngineState(
+    api,
+    reducePartyRpgEngineState(
+      runtimeState,
+      {
+        commentsByPlayerId: early.commentsByPlayerId,
+        players,
+        type: "judge_completed",
+        winnerId: early.winnerPlayerId,
+      },
+      buildContext(Date.now()),
+    ),
+  );
+  syncAfterRoundIfNeeded(api);
+  publishPartyHubState(api);
+  return true;
+}
+
 function maybeStartJudgeJob(api: GameHostApi<PartyRpgState>): void {
   if (runtimeState.publicState.stage !== "judge_deliberation") {
     return;
   }
-  if (runtimeState.judgeResolved || runtimeState.judgeStarted) {
+  if (runtimeState.judgeResolved) {
+    return;
+  }
+  if (tryConsumeJudgeEarly(api)) {
+    return;
+  }
+  if (runtimeState.judgeStarted) {
     return;
   }
 
@@ -345,6 +880,9 @@ async function runJudgeJob(
   api: GameHostApi<PartyRpgState>,
   epoch: number,
 ): Promise<void> {
+  if (tryConsumeJudgeEarly(api)) {
+    return;
+  }
   const gateway = getAiGateway();
   const players = api.getPlayers();
   const situation = runtimeState.publicState.currentSituation;
@@ -668,8 +1206,8 @@ export const gamePlugin = createGamePlugin<PartyRpgState, unknown>({
       matchSettled = false;
       lastRoundScored = -1;
       processedActionKeys.clear();
+      bumpPipelineSessionEpoch();
       pendingAssetEpoch += 1;
-      pendingEnrichmentEpoch += 1;
       pendingJudgeEpoch += 1;
       applyEngineState(
         api,
@@ -692,8 +1230,8 @@ export const gamePlugin = createGamePlugin<PartyRpgState, unknown>({
       maybeStartEnrichmentJobs(api);
     },
     onGameStop(api) {
+      bumpPipelineSessionEpoch();
       pendingAssetEpoch += 1;
-      pendingEnrichmentEpoch += 1;
       pendingJudgeEpoch += 1;
       applyEngineState(
         api,
@@ -816,6 +1354,7 @@ export const gamePlugin = createGamePlugin<PartyRpgState, unknown>({
           ),
         );
         publishPartyHubState(api);
+        scheduleNarrationForPlayer(api, input.playerId);
         maybeStartEnrichmentJobs(api);
         return;
       }
@@ -851,8 +1390,8 @@ export const gamePlugin = createGamePlugin<PartyRpgState, unknown>({
         matchSettled = false;
         lastRoundScored = -1;
         processedActionKeys.clear();
+        bumpPipelineSessionEpoch();
         pendingAssetEpoch += 1;
-        pendingEnrichmentEpoch += 1;
         pendingJudgeEpoch += 1;
         applyEngineState(
           api,
@@ -947,6 +1486,7 @@ export const gamePlugin = createGamePlugin<PartyRpgState, unknown>({
       matchSettled = false;
       lastRoundScored = -1;
       processedActionKeys.clear();
+      bumpPipelineSessionEpoch();
       runtimeState = createInitialPartyRpgEngineState(api.getPlayers());
       applyEngineState(api, runtimeState);
       api.results.clearLeaderboard();

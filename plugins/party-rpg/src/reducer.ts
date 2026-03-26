@@ -1,6 +1,7 @@
 import type { GamePlayerSnapshot } from "@game-hub/sdk";
 
 import { CHARACTER_CREATION_CONTENT, contentOptionById } from "./character-content.js";
+import { PLAYER_VOICE_A, PLAYER_VOICE_B, normalizePlayerVoiceProfileId } from "./voices.js";
 import { buildCharacterSummaryPreview } from "./character-summary-preview.js";
 import type { CharacterProfileDraft, ContentOption } from "./character-models.js";
 
@@ -46,6 +47,8 @@ export interface PartyRpgCharacterPublic {
   summaryShort: string;
   portraitEmoji: string;
   assetStatus: "pending" | "ready" | "error";
+  /** TTS only — `player_voice_a` | `player_voice_b`. */
+  voiceProfileId: string;
 }
 
 export interface PartyRpgPlayerRow {
@@ -59,6 +62,9 @@ export interface PartyRpgShowcaseEntry {
   narrationText: string;
   audioCueText: string | null;
   judgeComment: string | null;
+  /** All four segment texts in order (player/judge alternating). */
+  narrationSegmentTexts: string[];
+  ttsReady: boolean;
 }
 
 export interface PartyRpgSituation {
@@ -68,10 +74,25 @@ export interface PartyRpgSituation {
   tags: string[];
 }
 
+export type PartyRpgPipelineJobStatus =
+  | "idle"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "invalidated";
+
+export type PartyRpgJudgePipelineStatus =
+  | "idle"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed";
+
 export interface PartyRpgState extends Record<string, unknown> {
   answerDeadlineMs: number | null;
   characters: PartyRpgCharacterPublic[];
-  currentSituation: { id: string; title: string; prompt: string } | null;
+  currentSituation: { id: string; title: string; prompt: string; tags: string[] } | null;
   judgeWinnerId: string | null;
   latestMessage: string;
   llmMessage: string | null;
@@ -86,6 +107,9 @@ export interface PartyRpgState extends Record<string, unknown> {
   showcaseIndex: number;
   showcaseOrder: string[];
   stage: PartyRpgStage;
+  narrationStatusByPlayerId: Record<string, PartyRpgPipelineJobStatus>;
+  ttsStatusByPlayerId: Record<string, PartyRpgPipelineJobStatus>;
+  judgePipelineStatus: PartyRpgJudgePipelineStatus;
 }
 
 export interface PartyRpgEngineState {
@@ -144,7 +168,25 @@ export type PartyRpgEvent =
       winnerId: string;
     }
   | { players: GamePlayerSnapshot[]; type: "enrichment_timeout" }
-  | { players: GamePlayerSnapshot[]; type: "force_leave_asset_generation" };
+  | { players: GamePlayerSnapshot[]; type: "force_leave_asset_generation" }
+  | {
+      playerId: string;
+      players: GamePlayerSnapshot[];
+      status: PartyRpgPipelineJobStatus;
+      type: "pipeline_narration_status";
+    }
+  | {
+      playerId: string;
+      players: GamePlayerSnapshot[];
+      status: PartyRpgPipelineJobStatus;
+      type: "pipeline_tts_status";
+    }
+  | {
+      players: GamePlayerSnapshot[];
+      status: PartyRpgJudgePipelineStatus;
+      type: "pipeline_judge_status";
+    }
+  | { playerId: string; players: GamePlayerSnapshot[]; type: "showcase_tts_ready" };
 
 export interface PartyRpgReducerContext {
   nowMs: number;
@@ -187,6 +229,9 @@ function createLobbyPublicState(players: GamePlayerSnapshot[]): PartyRpgState {
     showcaseIndex: 0,
     showcaseOrder: [],
     stage: "lobby",
+    judgePipelineStatus: "idle",
+    narrationStatusByPlayerId: {},
+    ttsStatusByPlayerId: {},
   };
 }
 
@@ -228,6 +273,14 @@ export function reducePartyRpgEngineState(
       return applyEnrichmentTimeout(state, event.players, context);
     case "force_leave_asset_generation":
       return forceLeaveAssetGeneration(state, event.players, context);
+    case "pipeline_narration_status":
+      return applyPipelineNarrationStatus(state, event);
+    case "pipeline_tts_status":
+      return applyPipelineTtsStatus(state, event);
+    case "pipeline_judge_status":
+      return applyPipelineJudgeStatus(state, event);
+    case "showcase_tts_ready":
+      return applyShowcaseTtsReady(state, event);
     default:
       return state;
   }
@@ -248,11 +301,14 @@ function stopMatch(
     judgeStarted: false,
     publicState: {
       ...synced.publicState,
+      judgePipelineStatus: "idle",
       latestMessage: "Party-RPG vom Host gestoppt.",
       llmMessage: null,
+      narrationStatusByPlayerId: {},
       secondsRemaining: 0,
       stage:
         synced.publicState.stage === "lobby" ? "lobby" : "match_result",
+      ttsStatusByPlayerId: {},
     },
   };
 }
@@ -293,6 +349,9 @@ function startMatch(
       showcaseIndex: 0,
       showcaseOrder: [],
       stage: "character_creation",
+      judgePipelineStatus: "idle",
+      narrationStatusByPlayerId: {},
+      ttsStatusByPlayerId: {},
     },
     usedSituationIds: [],
   };
@@ -368,6 +427,7 @@ function syncPlayerRowsOnly(
       portraitEmoji: "🎭",
       slogan: "",
       summaryShort: "",
+      voiceProfileId: PLAYER_VOICE_A,
     } satisfies PartyRpgCharacterPublic;
   });
 
@@ -426,6 +486,7 @@ function registerCharacterDraft(
           portraitEmoji: pickPortraitEmoji(event.draft),
           slogan: event.draft.chosenSlogan.trim(),
           summaryShort: "",
+          voiceProfileId: normalizePlayerVoiceProfileId(event.draft.voiceProfileId),
         }
       : character,
   );
@@ -718,6 +779,7 @@ function beginRoundIntro(
       currentSituation: {
         id: situation.id,
         prompt: situation.prompt,
+        tags: situation.tags,
         title: situation.title,
       },
       judgeWinnerId: null,
@@ -731,6 +793,9 @@ function beginRoundIntro(
       showcaseOrder: [],
       stage: "round_intro",
       playerRows: clearedRows,
+      narrationStatusByPlayerId: {},
+      ttsStatusByPlayerId: {},
+      judgePipelineStatus: "idle",
     },
     usedSituationIds: [...synced.usedSituationIds, situation.id],
   };
@@ -1033,6 +1098,7 @@ function finalizeJudgeToRoundResult(
     judgeStarted: true,
     publicState: {
       ...synced.publicState,
+      judgePipelineStatus: "completed",
       judgeWinnerId: winnerId,
       latestMessage: `Rundensieger (Fallback): ${winnerId}`,
       roundWinnerId: winnerId,
@@ -1122,13 +1188,88 @@ function buildFallbackShowcaseEntries(
     const answer = state.privateAnswers[player.playerId] ?? "(nichts gesagt)";
     const safe =
       answer.length > 160 ? `${answer.slice(0, 157).trimEnd()}…` : answer;
+    const line = `${player.name} murmelt etwas Ungeheuerliches: „${safe}”`;
     return {
       audioCueText: null,
       judgeComment: null,
-      narrationText: `${player.name} murmelt etwas Ungeheuerliches: „${safe}”`,
+      narrationSegmentTexts: [line, "Hm.", line, "Weiter."],
+      narrationText: line,
       playerId: player.playerId,
+      ttsReady: false,
     };
   });
+}
+
+function applyPipelineNarrationStatus(
+  state: PartyRpgEngineState,
+  event: Extract<PartyRpgEvent, { type: "pipeline_narration_status" }>,
+): PartyRpgEngineState {
+  const synced = syncPlayerRowsOnly(state, event.players);
+  return {
+    ...synced,
+    publicState: {
+      ...synced.publicState,
+      narrationStatusByPlayerId: {
+        ...synced.publicState.narrationStatusByPlayerId,
+        [event.playerId]: event.status,
+      },
+    },
+  };
+}
+
+function applyPipelineTtsStatus(
+  state: PartyRpgEngineState,
+  event: Extract<PartyRpgEvent, { type: "pipeline_tts_status" }>,
+): PartyRpgEngineState {
+  const synced = syncPlayerRowsOnly(state, event.players);
+  return {
+    ...synced,
+    publicState: {
+      ...synced.publicState,
+      ttsStatusByPlayerId: {
+        ...synced.publicState.ttsStatusByPlayerId,
+        [event.playerId]: event.status,
+      },
+    },
+  };
+}
+
+function applyPipelineJudgeStatus(
+  state: PartyRpgEngineState,
+  event: Extract<PartyRpgEvent, { type: "pipeline_judge_status" }>,
+): PartyRpgEngineState {
+  const synced = syncPlayerRowsOnly(state, event.players);
+  return {
+    ...synced,
+    publicState: {
+      ...synced.publicState,
+      judgePipelineStatus: event.status,
+    },
+  };
+}
+
+function applyShowcaseTtsReady(
+  state: PartyRpgEngineState,
+  event: Extract<PartyRpgEvent, { type: "showcase_tts_ready" }>,
+): PartyRpgEngineState {
+  const synced = syncPlayerRowsOnly(state, event.players);
+  if (synced.publicState.stage !== "showcase") {
+    return synced;
+  }
+  const entries = synced.publicState.showcaseEntries.map((entry) =>
+    entry.playerId === event.playerId ? { ...entry, ttsReady: true } : entry,
+  );
+  return {
+    ...synced,
+    publicState: {
+      ...synced.publicState,
+      showcaseEntries: entries,
+      ttsStatusByPlayerId: {
+        ...synced.publicState.ttsStatusByPlayerId,
+        [event.playerId]: "completed",
+      },
+    },
+  };
 }
 
 function applyJudgeCompleted(
@@ -1162,6 +1303,7 @@ function applyJudgeCompleted(
     judgeStarted: true,
     publicState: {
       ...synced.publicState,
+      judgePipelineStatus: "completed",
       judgeWinnerId: winnerId,
       latestMessage: "Runde entschieden!",
       roundWinnerId: winnerId,
@@ -1253,6 +1395,11 @@ export function validateDraft(draft: PartyRpgCharacterDraft): string | null {
     return "Slogan muss zwischen 6 und 60 Zeichen haben.";
   }
 
+  const voice = draft.voiceProfileId?.trim();
+  if (voice !== PLAYER_VOICE_A && voice !== PLAYER_VOICE_B) {
+    return "Bitte eine Spielerstimme waehlen.";
+  }
+
   return null;
 }
 
@@ -1310,6 +1457,7 @@ export function parseCharacterDraftPayload(
     raceId: readNullableId(record, "raceId"),
     signatureObjectId: readNullableId(record, "signatureObjectId"),
     startItemId: readNullableId(record, "startItemId"),
+    voiceProfileId: readNullableId(record, "voiceProfileId"),
   };
 
   return draft;

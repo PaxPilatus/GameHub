@@ -14,9 +14,10 @@ Dieses Dokument fasst den Umsetzungsvertrag fuer `@game-hub/party-rpg` und die h
 ### Broadcast-sicher (`PartyRpgState` in `plugins/party-rpg/src/reducer.ts`)
 
 - Stage, Timer-/Deadline-Felder, Rundenindex, Spielerzeilen (ohne rohe Antworten).
-- Charaktere: Anzeigename, Archetyp, Slogan, Kurzsummary, Emoji/Placeholder-Portrait, `assetStatus`.
-- Aktuelle Situation: `id`, `title`, `prompt` (aus kuratiertem JSON).
-- Showcase: fixierte Reihenfolge, aktueller Index, **nur** freigegebene Eintraege (Narration, Judge-Kurzkommentar).
+- Charaktere: Anzeigename, Archetyp, Slogan, Kurzsummary, Emoji/Placeholder-Portrait, `assetStatus`, `voiceProfileId` (`player_voice_a` | `player_voice_b`, nur TTS).
+- Aktuelle Situation: `id`, `title`, `prompt`, `tags` (aus kuratiertem JSON).
+- Showcase: fixierte Reihenfolge, aktueller Index, **nur** freigegebene Eintraege (Narration als Segmenttexte + zusammengefasster Anzeigetext, `ttsReady`, Judge-Kurzkommentar).
+- Pipeline-Metadaten (ohne Prompts/Audio-Blobs): `narrationStatusByPlayerId`, `ttsStatusByPlayerId`, `judgePipelineStatus` fuer UI/Monitoring.
 - Rundenergebnis / Matcherergebnis: Winner-Id, Punkte, Platzhalter-Messages.
 
 ### Nicht im `gameState`
@@ -43,7 +44,7 @@ Reihenfolge (ohne Sonderfaelle):
 | asset_generation | alle Jobs fertig oder Fallback | Zeitlimit → Platzhalter-Summary/Emoji |
 | round_intro | Timer / `skip_intro` | Auto-Weiter |
 | answer_collection | alle Antworten oder Deadline | Fehlende → templated „keine Antwort“ |
-| llm_enrichment | Narrationen + Judge-Daten bereit | Parse-Fehler → deterministische Fallbacks |
+| llm_enrichment | Alle Spieler-`NarrationScript`s bereit → Showcase | LLM/TTS-Fehler → begrenzte Retries + Fallbacks; Judge kann bereits parallel laufen; TTS-MVP = Stub |
 | showcase | letzter Reveal / `next_reveal` | Schritt-Timer |
 | judge_deliberation | Winner fest (LLM + Validierung) | Fallback-Winner-Regel |
 | round_result | `continue_to_next_round` | Timer optional |

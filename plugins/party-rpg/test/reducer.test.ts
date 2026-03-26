@@ -12,6 +12,7 @@ import {
   type PartyRpgCharacterDraft,
   type PartyRpgSituation,
 } from "../src/reducer.js";
+import { PLAYER_VOICE_A } from "../src/voices.js";
 
 const SITUATIONS: PartyRpgSituation[] = [
   {
@@ -59,6 +60,7 @@ function validDraft(overrides: Partial<PartyRpgCharacterDraft> = {}): PartyRpgCh
     raceId: "human",
     signatureObjectId: "ominous_notebook",
     startItemId: "tent_hole_in_roof",
+    voiceProfileId: PLAYER_VOICE_A,
     ...overrides,
   };
 }
@@ -265,14 +267,18 @@ describe("party-rpg reducer", () => {
           {
             audioCueText: null,
             judgeComment: null,
+            narrationSegmentTexts: ["a1", "a2", "a3", "a4"],
             narrationText: "Show A",
             playerId: "p1",
+            ttsReady: false,
           },
           {
             audioCueText: null,
             judgeComment: null,
+            narrationSegmentTexts: ["b1", "b2", "b3", "b4"],
             narrationText: "Show B",
             playerId: "p2",
+            ttsReady: true,
           },
         ],
         players: PLAYERS,
@@ -313,6 +319,7 @@ describe("party-rpg reducer", () => {
       raceId: "elf",
       signatureObjectId: "dented_lute",
       startItemId: "dog_steals_food",
+      voiceProfileId: "player_voice_b",
     });
     expect(draft?.raceId).toBe("elf");
     expect(draft?.chosenName).toBe("Neo");

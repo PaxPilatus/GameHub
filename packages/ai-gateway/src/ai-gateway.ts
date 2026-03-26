@@ -3,9 +3,11 @@ import {
   extractJsonObject,
   JudgeOutputSchema,
   NarrationOutputSchema,
+  NarrationScriptSchema,
   type CharacterSummaryOutput,
   type JudgeOutput,
   type NarrationOutput,
+  type NarrationScript,
 } from "./ai-schemas.js";
 import {
   createOpenRouterClient,
@@ -142,6 +144,123 @@ export function createAiGateway(config: AiGatewayConfig) {
     return NarrationOutputSchema.parse(parsed);
   }
 
+  const NARRATION_SCRIPT_SYSTEM_PROMPT = [
+    "Du bist ein deutscher Fantasy-Comedy-Narroator fuer ein Partyspiel.",
+    "Antworte ausschliesslich als JSON gemaess dem geforderten Schema.",
+    "Die Spielmechanik (Outcome, Wurf-Zusammenfassung) ist final und darf nicht widersprochen werden.",
+    "Erfinde keine neuen Regeln, Inventare, Lore oder supernaturalen Faehigkeiten.",
+    "Schreibe kurze, klar sprechbare Saetze fuer TTS.",
+    "Erzeuge genau vier Segmente mit Sprecher-Reihenfolge: player, judge, player, judge.",
+    "Der Judge nennt an der passenden Stelle den Wurf oder das Outcome.",
+    "Keine Meta-Kommentare, keine Regelklaerungen, kein Text ausserhalb des JSON.",
+    "Bei unsicherem Input: bleib neutral-komisch innerhalb der vorgegebenen Fakten.",
+  ].join(" ");
+
+  async function generateNarrationScript(input: {
+    characterStyleJson: string;
+    mechanicsJson: string;
+    roundContextJson: string;
+    answerText: string;
+    sessionId: string;
+    playerId: string;
+    roundIndex: number;
+    signal?: AbortSignal;
+    stale?: StaleGuard;
+  }): Promise<NarrationScript> {
+    const user = [
+      `sessionId: ${input.sessionId}`,
+      `playerId: ${input.playerId}`,
+      `roundIndex: ${String(input.roundIndex)}`,
+      "",
+      "CharacterStyleProfile (JSON):",
+      input.characterStyleJson,
+      "",
+      "RoundContext (JSON):",
+      input.roundContextJson,
+      "",
+      "MechanicsContext (JSON):",
+      input.mechanicsJson,
+      "",
+      "Spielerantwort (Roh):",
+      input.answerText,
+    ].join("\n");
+
+    const narrationOpts: {
+      retries: number;
+      timeoutMs: number;
+      signal?: AbortSignal;
+    } = { retries: 1, timeoutMs: 45_000 };
+    if (input.signal !== undefined) {
+      narrationOpts.signal = input.signal;
+    }
+
+    const { text } = await client.chatCompletionWithRetry(
+      {
+        maxTokens: 520,
+        messages: [
+          { content: NARRATION_SCRIPT_SYSTEM_PROMPT, role: "system" },
+          { content: user, role: "user" },
+        ],
+        model: config.chatModel,
+        responseFormat: { type: "json_object" },
+        temperature: 0.85,
+      },
+      narrationOpts,
+    );
+
+    if (input.stale?.isStale() === true) {
+      throw new Error("ai_stale_guard");
+    }
+
+    const parsed = extractJsonObject(text);
+    return NarrationScriptSchema.parse(parsed);
+  }
+
+  async function repairNarrationScript(input: {
+    brokenJsonText: string;
+    mechanicsJson: string;
+    signal?: AbortSignal;
+    stale?: StaleGuard;
+  }): Promise<NarrationScript> {
+    const system = [
+      "Du reparierst JSON fuer ein Partyspiel.",
+      "Antworte nur mit einem JSON-Objekt, das exakt dem Schema entspricht (sessionId, roundIndex, playerId, outcome, rollSummary, segments[4] mit speaker player/judge abwechselnd).",
+      "Uebernimm outcome und rollSummary aus MechanicsContext unveraendert.",
+    ].join(" ");
+    const user = [
+      "MechanicsContext (JSON):",
+      input.mechanicsJson,
+      "",
+      "Kaputtes oder ungueltiges JSON:",
+      input.brokenJsonText,
+    ].join("\n");
+    const opts: { retries: number; timeoutMs: number; signal?: AbortSignal } = {
+      retries: 0,
+      timeoutMs: 25_000,
+    };
+    if (input.signal !== undefined) {
+      opts.signal = input.signal;
+    }
+    const { text } = await client.chatCompletionWithRetry(
+      {
+        maxTokens: 520,
+        messages: [
+          { content: system, role: "system" },
+          { content: user, role: "user" },
+        ],
+        model: config.chatModel,
+        responseFormat: { type: "json_object" },
+        temperature: 0.2,
+      },
+      opts,
+    );
+    if (input.stale?.isStale() === true) {
+      throw new Error("ai_stale_guard");
+    }
+    const parsed = extractJsonObject(text);
+    return NarrationScriptSchema.parse(parsed);
+  }
+
   async function judgeRound(input: {
     situationPrompt: string;
     entries: Array<{
@@ -199,7 +318,9 @@ export function createAiGateway(config: AiGatewayConfig) {
   return {
     generateCharacterSummary,
     generateNarration,
+    generateNarrationScript,
     judgeRound,
+    repairNarrationScript,
   };
 }
 

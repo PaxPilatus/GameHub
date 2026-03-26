@@ -31,6 +31,8 @@ export type CharacterProfileDraft = {
   quirkId: string | null;
   signatureObjectId: string | null;
   startItemId: string | null;
+  /** Player TTS voice; must be one of the MVP voice ids. */
+  voiceProfileId: string | null;
   chosenName: string;
   chosenSlogan: string;
 };

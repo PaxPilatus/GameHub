@@ -1,5 +1,6 @@
 import { CHARACTER_CREATION_CONTENT, contentOptionById } from "./character-content.js";
 import type { CharacterProfileDraft } from "./character-models.js";
+import { PLAYER_VOICE_A, PLAYER_VOICE_B } from "./voices.js";
 
 export const WIZARD_STEP_COUNT = 5;
 export const WIZARD_STORAGE_VERSION = 1;
@@ -70,6 +71,15 @@ export function sanitizePersistedWizard(blob: unknown): PersistedWizardState | n
   const startItemId = typeof d.startItemId === "string" ? d.startItemId : null;
   const chosenName = typeof d.chosenName === "string" ? d.chosenName : "";
   const chosenSlogan = typeof d.chosenSlogan === "string" ? d.chosenSlogan : "";
+  const voiceProfileId =
+    typeof d.voiceProfileId === "string" ? d.voiceProfileId.trim() : null;
+  if (
+    voiceProfileId !== null &&
+    voiceProfileId !== PLAYER_VOICE_A &&
+    voiceProfileId !== PLAYER_VOICE_B
+  ) {
+    return null;
+  }
 
   const draft: CharacterProfileDraft = {
     backgroundId,
@@ -82,6 +92,7 @@ export function sanitizePersistedWizard(blob: unknown): PersistedWizardState | n
     raceId,
     signatureObjectId,
     startItemId,
+    voiceProfileId,
   };
 
   const c = CHARACTER_CREATION_CONTENT;
